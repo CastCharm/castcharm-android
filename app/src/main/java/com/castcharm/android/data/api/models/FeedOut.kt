@@ -1,0 +1,25 @@
+package com.castcharm.android.data.api.models
+
+data class FeedOut(
+    val id: Int,
+    val url: String,
+    val title: String?,
+    val description: String?,
+    val image_url: String?,
+    val custom_image_url: String?,
+    val website_url: String?,
+    val author: String?,
+    val language: String?,
+    val category: String?,
+    val podcast_group: String?,
+    val primary_feed_id: Int?,
+    val auto_download_new: Boolean?,
+    val active: Boolean,
+    val last_checked: String?,
+    val last_error: String?,
+    val episode_count: Int = 0,
+    val unplayed_count: Int = 0,
+    val downloaded_count: Int = 0,
+    val created_at: String,
+    val updated_at: String,
+)

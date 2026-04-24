@@ -1,0 +1,460 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package com.castcharm.android.ui.episodes
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.castcharm.android.CastCharmApp
+import com.castcharm.android.ui.shared_components.AppTopBarTitle
+import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
+import com.castcharm.android.ui.shared_components.EpisodeCard
+import com.castcharm.android.ui.shared_components.EpisodeCardSkeleton
+import com.castcharm.android.ui.shared_components.EpisodeDownloadActionOverride
+import com.castcharm.android.ui.shared_components.OfflineModePanel
+import com.castcharm.android.ui.shared_components.PlaceholderArtwork
+import com.castcharm.android.ui.shared_components.ReconnectIconButton
+import com.castcharm.android.ui.shared_components.stripHtml
+
+@Composable
+fun EpisodeListScreen(
+    feedId: Int,
+    viewModel: EpisodeListViewModel,
+    onPlayEpisode: (episodeId: Int) -> Unit = {},
+    onNavigateBack: () -> Unit = {},
+    isOfflineMode: Boolean = false,
+    isReconnectInFlight: Boolean = false,
+    onRetryConnection: (() -> Unit)? = null,
+    onNavigateToDownloads: (() -> Unit)? = null
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    val feed = uiState.feed
+    val baseUrl = if (CastCharmApp.apiClient.isInitialized) {
+        CastCharmApp.apiClient.getBaseUrl()
+    } else {
+        ""
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+    var expandedEpisodeId by remember { mutableStateOf<Int?>(null) }
+    val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
+    var showDownloadConfirm by remember { mutableStateOf(false) }
+
+    if (showDownloadConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDownloadConfirm = false },
+            title = { Text("Download to phone?") },
+            text = { Text("Download ${uiState.selectedEpisodes.size} episode(s) to this device?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.downloadSelected()
+                        showDownloadConfirm = false
+                    }
+                ) {
+                    Text("Download")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDownloadConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    ConsumeSnackbarMessage(
+        message = uiState.errorMessage,
+        snackbarHostState = snackbarHostState,
+        onConsumed = { viewModel.clearError() },
+        enabled = !isOfflineMode
+    )
+
+    val topBarTitle = when {
+        isSelectionMode -> "${uiState.selectedEpisodes.size} selected"
+        isOfflineMode && feed != null -> feed.title
+        isOfflineMode -> "Offline Mode"
+        feed != null -> feed.title
+        uiState.isInitialLoading -> "Loading…"
+        else -> "Episodes"
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    AppTopBarTitle(text = topBarTitle, showIcon = false)
+                },
+                navigationIcon = {
+                    if (isSelectionMode) {
+                        IconButton(onClick = { viewModel.clearSelection() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        }
+                    } else {
+                        IconButton(onClick = onNavigateBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
+                actions = {
+                    when {
+                        isSelectionMode -> {
+                            TextButton(onClick = { viewModel.selectAll() }) {
+                                Text("All")
+                            }
+                            IconButton(onClick = { showDownloadConfirm = true }) {
+                                Icon(Icons.Default.PhoneAndroid, contentDescription = "Download to phone")
+                            }
+                        }
+
+                        isOfflineMode && onRetryConnection != null -> {
+                            ReconnectIconButton(
+                                onClick = onRetryConnection,
+                                inFlight = isReconnectInFlight
+                            )
+                        }
+
+                        uiState.isRefreshing -> {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .padding(10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            }
+                        }
+
+                        else -> {
+                            IconButton(onClick = { viewModel.refreshEpisodes() }) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            }
+                        }
+                    }
+                }
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { padding ->
+        if (isOfflineMode) {
+            OfflineEpisodesContent(
+                modifier = Modifier.padding(top = padding.calculateTopPadding()),
+                feedTitle = feed?.title,
+                isReconnectInFlight = isReconnectInFlight,
+                onRetryConnection = onRetryConnection,
+                onNavigateToDownloads = onNavigateToDownloads
+            )
+            return@Scaffold
+        }
+
+        when {
+            uiState.isInitialLoading && uiState.episodes.isEmpty() -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 8.dp,
+                        top = 4.dp + padding.calculateTopPadding(),
+                        end = 8.dp,
+                        bottom = 4.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item { FeedHeaderSkeleton() }
+                    items(6) { EpisodeCardSkeleton() }
+                }
+            }
+
+            uiState.episodes.isEmpty() -> {
+                EmptyEpisodeScreen(modifier = Modifier.padding(top = padding.calculateTopPadding()))
+            }
+
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 8.dp,
+                        top = 4.dp + padding.calculateTopPadding(),
+                        end = 8.dp,
+                        bottom = 4.dp
+                    )
+                ) {
+                    if (feed != null) {
+                        item {
+                            FeedHeader(
+                                feedTitle = feed.title,
+                                feedDescription = feed.description,
+                                imageUrl = feed.custom_image_url ?: feed.image_url
+                                ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${feed.id}/cover.jpg" else null,
+                                episodeCount = feed.episode_count,
+                                unplayedCount = feed.unplayed_count
+                            )
+                        }
+                    }
+
+                    items(uiState.episodes, key = { it.id }) { episode ->
+                        val isSelected = episode.id in uiState.selectedEpisodes
+                        val isPhoneDownloadInProgress = episode.id in uiState.activePhoneDownloadEpisodeIds
+
+                        EpisodeCard(
+                            episode = episode,
+                            baseUrl = baseUrl,
+                            isSelected = isSelected,
+                            expanded = !isSelectionMode && expandedEpisodeId == episode.id,
+                            onToggleExpand = {
+                                if (isSelectionMode) {
+                                    viewModel.toggleEpisodeSelection(episode.id)
+                                } else {
+                                    expandedEpisodeId = if (expandedEpisodeId == episode.id) null else episode.id
+                                }
+                            },
+                            onLongPress = {
+                                if (!isSelectionMode) {
+                                    expandedEpisodeId = null
+                                    viewModel.toggleEpisodeSelection(episode.id)
+                                }
+                            },
+                            onPlay = { onPlayEpisode(episode.id) },
+                            onTogglePlayedStatus = { viewModel.togglePlayed(episode.id, episode.played) },
+                            onDownloadToServer = { viewModel.downloadToServer(episode.id) },
+                            onDownloadToDevice = { viewModel.downloadEpisode(episode.id) },
+                            downloadActionOverride = when {
+                                episode.local_path != null -> EpisodeDownloadActionOverride.ON_PHONE
+                                isPhoneDownloadInProgress -> EpisodeDownloadActionOverride.PHONE_IN_PROGRESS
+                                else -> null
+                            }
+                        )
+                    }
+
+                    if (uiState.hasMore) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (uiState.isRefreshing) {
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                                } else {
+                                    OutlinedButton(onClick = { viewModel.loadMore() }) {
+                                        Text("Load More")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineEpisodesContent(
+    modifier: Modifier = Modifier,
+    feedTitle: String?,
+    isReconnectInFlight: Boolean = false,
+    onRetryConnection: (() -> Unit)? = null,
+    onNavigateToDownloads: (() -> Unit)? = null
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        OfflineModePanel(
+            message = if (!feedTitle.isNullOrBlank()) {
+                "$feedTitle can’t be browsed while offline. You can still use Downloads, open Settings, and play files already saved on this phone."
+            } else {
+                "Episode browsing isn’t available while offline. You can still use Downloads, open Settings, and play files already saved on this phone."
+            },
+            primaryActionLabel = if (onNavigateToDownloads != null) "Go to Downloads" else null,
+            onPrimaryAction = onNavigateToDownloads,
+            reconnectInFlight = isReconnectInFlight,
+            onRetryConnection = onRetryConnection
+        )
+    }
+}
+
+@Composable
+fun FeedHeader(
+    feedTitle: String,
+    feedDescription: String?,
+    imageUrl: String?,
+    episodeCount: Int,
+    unplayedCount: Int
+) {
+    var descriptionExpanded by remember { mutableStateOf(false) }
+
+    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+            PlaceholderArtwork(
+                imageUrl = imageUrl,
+                contentDescription = feedTitle,
+                modifier = Modifier.size(80.dp),
+                contentScale = ContentScale.Crop,
+                cornerRadiusDp = 8
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = feedTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "$episodeCount episodes",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (unplayedCount > 0) {
+                        Badge { Text("$unplayedCount unplayed") }
+                    }
+                }
+                if (feedDescription != null) {
+                    val plainText = remember(feedDescription) { stripHtml(feedDescription) }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = plainText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = if (descriptionExpanded) Int.MAX_VALUE else 3,
+                        overflow = if (descriptionExpanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { descriptionExpanded = !descriptionExpanded }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedHeaderSkeleton() {
+    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.dp
+                )
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.65f)
+                        .height(18.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.4f)
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+                Spacer(Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyEpisodeScreen(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.QueueMusic,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        )
+        Spacer(Modifier.height(12.dp))
+        Text("No episodes", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Check back after syncing",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}

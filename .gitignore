@@ -32,3 +32,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Other ignores for local dev
+get-public-key.bat
+img/*
+launch-DHU.bat
