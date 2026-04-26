@@ -38,6 +38,11 @@ class FeedRepository(
 
         val feeds = api.getFeeds()
         val baseUrl = CastCharmApp.apiClient.getBaseUrl()
+
+        // Snapshot existing rows first so local-only fields (playback_speed) are
+        // not erased when the server response overwrites the rest of the row.
+        val existingById = feedDao.getFeedOnceAll().associateBy { it.id }
+
         val entities = feeds.map { feed ->
             FeedEntity(
                 id = feed.id,
@@ -53,7 +58,8 @@ class FeedRepository(
                 last_error = feed.last_error,
                 episode_count = feed.episode_count,
                 unplayed_count = feed.unplayed_count,
-                downloaded_count = feed.downloaded_count
+                downloaded_count = feed.downloaded_count,
+                playback_speed = existingById[feed.id]?.playback_speed
             )
         }
 

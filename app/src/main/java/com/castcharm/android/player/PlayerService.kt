@@ -395,6 +395,18 @@ class PlayerService : MediaLibraryService() {
                     if (isPlaying) startProgressTracking() else stopProgressTracking()
                 }
 
+                // Apply the per-feed speed preference whenever the playing episode changes.
+                // The speed is embedded in castcharm_feed_speed by resolveMediaItem() so we
+                // don't need an extra DB round-trip here. The guard prevents a spurious
+                // onPlaybackParametersChanged (and its metadata refresh) when speed is unchanged.
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    val feedSpeed = mediaItem?.mediaMetadata?.extras
+                        ?.getFloat("castcharm_feed_speed", 1f) ?: 1f
+                    if (player.playbackParameters.speed != feedSpeed) {
+                        player.setPlaybackParameters(PlaybackParameters(feedSpeed))
+                    }
+                }
+
                 // When the episode finishes naturally, mark it played immediately
                 // rather than waiting for the next progress sync cycle.
                 override fun onPlaybackStateChanged(playbackState: Int) {
@@ -826,6 +838,16 @@ private class PlayerLibrarySessionCallback(
             latestPlaybackSpeed = next
             player.setPlaybackSpeed(next)
 
+            // Persist the speed change for this feed so it survives session restarts.
+            scope.launch {
+                val feedId = player.currentMediaItem?.mediaId
+                    ?.removePrefix("episode_")?.toIntOrNull()
+                    ?.let { episodeDao.getEpisodeOnce(it)?.feed_id }
+                if (feedId != null) {
+                    feedDao.updatePlaybackSpeed(feedId, next)
+                }
+            }
+
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
         return super.onCustomCommand(session, controller, customCommand, args)
@@ -1150,11 +1172,14 @@ private class PlayerLibrarySessionCallback(
         val feedTitle = feed?.title ?: "Unknown Podcast"
         val artworkUri = resolveEpisodeArtworkUri(context, episode)
 
+        val feedSpeed = feed?.playback_speed ?: 1f
+
         val metadataExtras = Bundle().apply {
             putString("castcharm_episode_id", episode.id.toString())
             putString("castcharm_feed_title", feedTitle)
             putString("castcharm_artwork_uri", artworkUri.toString())
             episode.duration?.let { putLong("castcharm_duration_ms", it * 1000L) }
+            putFloat("castcharm_feed_speed", feedSpeed)
         }
 
         val metadata = item.mediaMetadata.buildUpon()

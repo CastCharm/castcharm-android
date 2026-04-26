@@ -60,4 +60,7 @@ interface FeedDao {
 
     @Query("DELETE FROM feeds")
     suspend fun deleteAll()
+
+    @Query("UPDATE feeds SET playback_speed = :speed WHERE id = :feedId")
+    suspend fun updatePlaybackSpeed(feedId: Int, speed: Float)
 }

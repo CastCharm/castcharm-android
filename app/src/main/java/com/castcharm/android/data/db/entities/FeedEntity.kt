@@ -26,5 +26,8 @@ data class FeedEntity(
     // Denormalized counts from the server response, used for feed card badges.
     val episode_count: Int = 0,
     val unplayed_count: Int = 0,
-    val downloaded_count: Int = 0
+    val downloaded_count: Int = 0,
+    // Local-only preference — not synced to server. null means no preference set yet
+    // (falls back to 1.0× at playback time). Written by PlayerViewModel on speed change.
+    val playback_speed: Float? = null
 )

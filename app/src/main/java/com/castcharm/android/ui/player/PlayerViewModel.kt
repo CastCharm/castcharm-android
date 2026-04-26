@@ -384,6 +384,10 @@ class PlayerViewModel : ViewModel() {
 
     fun setPlaybackSpeed(speed: Float) {
         playerController.setPlaybackSpeed(speed)
+        val feedId = _uiState.value.feed?.id ?: return
+        viewModelScope.launch {
+            db.feedDao().updatePlaybackSpeed(feedId, speed)
+        }
     }
 
     fun markPlayed() {

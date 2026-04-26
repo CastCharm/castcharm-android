@@ -24,7 +24,7 @@ import com.castcharm.android.data.db.entities.FeedEntity
 
 @Database(
     entities = [FeedEntity::class, EpisodeEntity::class, DownloadEntity::class],
-    version = 3
+    version = 4
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun feedDao(): FeedDao

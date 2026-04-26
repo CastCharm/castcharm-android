@@ -75,7 +75,8 @@ private data class EpisodePlaybackRequest(
     val episodeId: Int,
     val mediaUri: String?,
     val positionSeconds: Int,
-    val resumeWithRewind: Boolean
+    val resumeWithRewind: Boolean,
+    val feedSpeed: Float = 1f
 )
 
 class PlayerController(private val context: Context) {
@@ -135,7 +136,8 @@ class PlayerController(private val context: Context) {
                             episodeId = request.episodeId,
                             mediaUri = request.mediaUri,
                             positionSeconds = request.positionSeconds,
-                            resumeWithRewind = request.resumeWithRewind
+                            resumeWithRewind = request.resumeWithRewind,
+                            feedSpeed = request.feedSpeed
                         )
                     }
                 } catch (e: Exception) {
@@ -294,7 +296,8 @@ class PlayerController(private val context: Context) {
                     episodeId = request.episodeId,
                     mediaUri = request.mediaUri,
                     positionSeconds = request.positionSeconds,
-                    resumeWithRewind = request.resumeWithRewind
+                    resumeWithRewind = request.resumeWithRewind,
+                    feedSpeed = request.feedSpeed
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -339,12 +342,14 @@ class PlayerController(private val context: Context) {
                 played = localEpisode.played,
                 positionSeconds = localEpisode.play_position_seconds
             )
+            val feedSpeed = db.feedDao().getFeedOnce(localEpisode.feed_id)?.playback_speed ?: 1f
 
             return EpisodePlaybackRequest(
                 episodeId = localEpisode.id,
                 mediaUri = localFile.absolutePath,
                 positionSeconds = if (shouldResume) localEpisode.play_position_seconds else 0,
-                resumeWithRewind = shouldResume
+                resumeWithRewind = shouldResume,
+                feedSpeed = feedSpeed
             )
         }
 
@@ -381,12 +386,14 @@ class PlayerController(private val context: Context) {
             played = episode.played,
             positionSeconds = episode.play_position_seconds
         )
+        val feedSpeed = db.feedDao().getFeedOnce(episode.feed_id)?.playback_speed ?: 1f
 
         return EpisodePlaybackRequest(
             episodeId = episode.id,
             mediaUri = mediaUri,
             positionSeconds = if (shouldResume) episode.play_position_seconds else 0,
-            resumeWithRewind = shouldResume
+            resumeWithRewind = shouldResume,
+            feedSpeed = feedSpeed
         )
     }
 
@@ -404,7 +411,8 @@ class PlayerController(private val context: Context) {
         episodeId: Int,
         mediaUri: String?,
         positionSeconds: Int = 0,
-        resumeWithRewind: Boolean = false
+        resumeWithRewind: Boolean = false,
+        feedSpeed: Float = 1f
     ) {
         val controller = mediaController
         if (controller == null) {
@@ -413,7 +421,8 @@ class PlayerController(private val context: Context) {
                 episodeId = episodeId,
                 mediaUri = mediaUri,
                 positionSeconds = positionSeconds,
-                resumeWithRewind = resumeWithRewind
+                resumeWithRewind = resumeWithRewind,
+                feedSpeed = feedSpeed
             )
             return
         }
@@ -444,6 +453,7 @@ class PlayerController(private val context: Context) {
         val mediaItem = mediaItemBuilder.build()
 
         controller.setMediaItem(mediaItem, startPositionMs)
+        controller.setPlaybackSpeed(feedSpeed)
         controller.prepare()
         controller.play()
 
