@@ -16,6 +16,7 @@ package com.castcharm.android.download
 
 import android.content.Context
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -23,12 +24,15 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import java.util.concurrent.TimeUnit
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.entities.DownloadEntity
 import com.castcharm.android.dataStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.util.UUID
+
+private const val DOWNLOAD_BACKOFF_SECONDS = 30L
 
 // DataStore key for the user-configurable concurrency limit (Settings screen).
 private val MAX_CONCURRENT_DOWNLOADS_KEY = intPreferencesKey("max_concurrent_downloads")
@@ -177,6 +181,12 @@ class DownloadScheduler(private val context: Context) {
             // Rows with null work_request_id haven't been dispatched yet —
             // skip them here; they'll be picked up in Phase 2.
             val requestId = download.work_request_id ?: continue
+
+            // "FAILED_PERMANENT" sentinel means the download exhausted all retries.
+            // Leave the row so the UI shows the failure card; don't count it as an
+            // active slot and don't touch it here.
+            if (requestId == "FAILED_PERMANENT") continue
+
             val workInfo = lookupWorkInfoById(requestId)
             val episode = episodeDao.getEpisodeOnce(download.episode_id)
 
@@ -201,10 +211,10 @@ class DownloadScheduler(private val context: Context) {
                     }
                 }
 
-                // Worker failed. If the episode somehow already has a file,
-                // clean up the stale row. Otherwise reset the work_request_id
-                // to null so Phase 2 can re-dispatch it as a fresh queued item,
-                // preserving the partial progress percentage.
+                // Worker failed. If the episode already has a file, clean up the stale
+                // row. Otherwise reset work_request_id so Phase 2 can re-dispatch.
+                // Permanently failed downloads use the "FAILED_PERMANENT" sentinel and
+                // are skipped by the continue above, so they never reach this branch.
                 WorkInfo.State.FAILED -> {
                     if (episode?.local_path != null) {
                         downloadDao.deleteByEpisodeId(download.episode_id)
@@ -270,6 +280,7 @@ class DownloadScheduler(private val context: Context) {
                 return@forEach
             }
 
+
             // Re-read the row to guard against a race where another kickQueue()
             // call already assigned a work_request_id between our getQueuedDownloads()
             // read and now.
@@ -292,6 +303,7 @@ class DownloadScheduler(private val context: Context) {
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build()
                 )
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, DOWNLOAD_BACKOFF_SECONDS, TimeUnit.SECONDS)
                 .build()
 
             // ExistingWorkPolicy.REPLACE ensures a fresh worker is always

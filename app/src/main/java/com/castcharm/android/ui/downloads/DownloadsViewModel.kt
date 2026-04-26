@@ -188,6 +188,14 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
+    fun retryDownload(episodeId: Int) {
+        viewModelScope.launch {
+            downloadScheduler.scheduleDownload(episodeId)
+            lastKnownPhoneProgress.remove(episodeId)
+            refreshPhoneProgress()
+        }
+    }
+
     fun deleteEpisodeDownload(episode: EpisodeEntity) {
         viewModelScope.launch {
             episode.local_path?.let { path ->
@@ -412,6 +420,17 @@ class DownloadsViewModel : ViewModel() {
         row: DownloadEntity,
         episode: EpisodeEntity
     ): DownloadProgressUi {
+        if (episode.status == "phone_failed" || row.work_request_id == "FAILED_PERMANENT") {
+            return DownloadProgressUi(
+                status = "Failed",
+                percent = episode.download_progress.coerceIn(0, 100),
+                bytesDownloaded = 0L,
+                totalBytes = episode.enclosure_length ?: 0L,
+                speedBytesPerSec = 0L,
+                isCancellable = false
+            )
+        }
+
         val episodePercent = episode.download_progress.coerceIn(0, 100)
         val rowPercent = row.progress_pct.coerceIn(0, 100)
         val percent = maxOf(rowPercent, episodePercent)
@@ -661,7 +680,9 @@ class DownloadsViewModel : ViewModel() {
                         cached?.let {
                             DownloadItem(episode = episode, feed = item.feed, progress = it)
                         }
-                    } else if (downloadRow.work_request_id.isNullOrBlank()) {
+                    } else if (downloadRow.work_request_id.isNullOrBlank() ||
+                        downloadRow.work_request_id == "FAILED_PERMANENT"
+                    ) {
                         val seeded = lastKnownPhoneProgress[item.episode.id]
                             ?: item.progress
                             ?: seedPhoneProgressFromRow(downloadRow, episode)

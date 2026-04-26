@@ -324,8 +324,9 @@ fun DownloadsScreen(
                                 ) { item ->
                                     InProgressDownloadCard(
                                         item = item,
-                                        titleOverride = "Saving to Phone",
-                                        onCancel = { viewModel.cancelDownload(item.episode.id) }
+                                        titleOverride = if (item.progress?.isCancellable == false) "Phone Download Failed" else "Saving to Phone",
+                                        onCancel = { viewModel.cancelDownload(item.episode.id) },
+                                        onRetry = { viewModel.retryDownload(item.episode.id) }
                                     )
                                 }
                             }
@@ -458,8 +459,12 @@ fun DownloadsScreen(
                                         onPlay = { onPlayEpisode(episode.id) },
                                         onTogglePlayedStatus = { viewModel.togglePlayed(episode.id, episode.played) },
                                         onDownloadToServer = {},
-                                        onDownloadToDevice = {},
-                                        downloadActionOverride = EpisodeDownloadActionOverride.PHONE_IN_PROGRESS
+                                        onDownloadToDevice = { viewModel.retryDownload(episode.id) },
+                                        downloadActionOverride = if (item.progress?.isCancellable == false) {
+                                            EpisodeDownloadActionOverride.PHONE_FAILED
+                                        } else {
+                                            EpisodeDownloadActionOverride.PHONE_IN_PROGRESS
+                                        }
                                     )
                                 }
                             }
@@ -578,6 +583,7 @@ private fun EmptyDownloadsState() {
 private fun InProgressDownloadCard(
     item: DownloadItem,
     onCancel: () -> Unit,
+    onRetry: (() -> Unit)? = null,
     titleOverride: String? = null
 ) {
     val progress = item.progress
@@ -666,11 +672,21 @@ private fun InProgressDownloadCard(
                     )
                 }
 
-                TextButton(
-                    onClick = onCancel,
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Cancel")
+                val isFailed = item.progress?.isCancellable == false
+                if (isFailed && onRetry != null) {
+                    TextButton(
+                        onClick = onRetry,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Retry")
+                    }
+                } else if (!isFailed) {
+                    TextButton(
+                        onClick = onCancel,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Cancel")
+                    }
                 }
             }
         }

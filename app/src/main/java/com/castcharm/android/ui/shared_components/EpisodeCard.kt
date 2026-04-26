@@ -70,18 +70,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// The seven possible download states an episode can be in from the app's perspective.
-// ON_PHONE        — audio file is saved on this device (local_path != null)
-// SAVE_TO_PHONE   — file is on the server (status=downloaded) but not yet on this device
+// The eight possible download states an episode can be in from the app's perspective.
+// ON_PHONE          — audio file is saved on this device (local_path != null)
+// SAVE_TO_PHONE     — file is on the server (status=downloaded) but not yet on this device
 // PHONE_IN_PROGRESS — WorkManager is actively downloading to this device
+// PHONE_FAILED      — phone-side download exhausted all retries; tap Retry to restart
 // SERVER_DOWNLOADING — the server is actively downloading from the RSS source
-// SERVER_QUEUED   — the server has the episode queued for download
-// SAVE_TO_SERVER  — episode is not downloaded anywhere; only the metadata exists
-// RETRY_SERVER    — a previous server-side download attempt failed
+// SERVER_QUEUED     — the server has the episode queued for download
+// SAVE_TO_SERVER    — episode is not downloaded anywhere; only the metadata exists
+// RETRY_SERVER      — a previous server-side download attempt failed
 enum class EpisodeDownloadActionOverride {
     ON_PHONE,
     SAVE_TO_PHONE,
     PHONE_IN_PROGRESS,
+    PHONE_FAILED,
     SERVER_DOWNLOADING,
     SERVER_QUEUED,
     SAVE_TO_SERVER,
@@ -243,6 +245,15 @@ fun EpisodeCard(
                                 )
                             }
 
+                            EpisodeDownloadActionOverride.PHONE_FAILED -> {
+                                Icon(
+                                    Icons.Default.Error,
+                                    contentDescription = "Phone Download Failed",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+
                             EpisodeDownloadActionOverride.SERVER_DOWNLOADING -> {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(14.dp),
@@ -387,6 +398,15 @@ fun EpisodeCard(
                                     label = "Phone DL…",
                                     tint = MaterialTheme.colorScheme.primary,
                                     onClick = {}
+                                )
+                            }
+
+                            EpisodeDownloadActionOverride.PHONE_FAILED -> {
+                                EpisodeActionButton(
+                                    icon = Icons.Default.Error,
+                                    label = "Retry",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    onClick = onDownloadToDevice
                                 )
                             }
 

@@ -40,6 +40,8 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
+private const val MAX_DOWNLOAD_ATTEMPTS = 3
+
 class DownloadWorker(
     context: Context,
     params: WorkerParameters
@@ -112,6 +114,39 @@ class DownloadWorker(
             // Kick the queue so the freed concurrency slot can be filled by
             // the next waiting episode.
             runCatching { scheduler.kickQueue() }
+        }
+
+        // For retriable errors: retry with WorkManager's backoff up to MAX_DOWNLOAD_ATTEMPTS.
+        // On the final attempt, mark the episode as permanently failed and keep the download
+        // row (with work_request_id cleared) so the UI can show the failure indicator.
+        suspend fun retryOrFail(deletePartial: Boolean): Result {
+            if (!ownsRow()) return Result.failure()
+
+            if (deletePartial) {
+                partialFile?.let { if (it.exists()) it.delete() }
+            }
+
+            val current = episodeDao.getEpisodeOnce(episodeId)
+
+            return if (runAttemptCount >= MAX_DOWNLOAD_ATTEMPTS - 1) {
+                // All attempts exhausted — mark as phone_failed. Use "FAILED_PERMANENT"
+                // sentinel (not null) so kickQueue() Phase 2 never auto-retries this row
+                // even if a server sync resets the episode status back to "downloaded".
+                if (current != null) {
+                    db.withTransaction {
+                        episodeDao.update(current.copy(status = "phone_failed"))
+                        downloadDao.updateWorkRequestId(episodeId, "FAILED_PERMANENT")
+                    }
+                }
+                Result.failure()
+            } else {
+                // More attempts remain — reset status for the backoff wait period
+                // and let WorkManager retry with the configured exponential backoff.
+                if (current != null && current.local_path == null) {
+                    episodeDao.update(current.copy(status = "queued"))
+                }
+                Result.retry()
+            }
         }
 
         try {
@@ -234,24 +269,13 @@ class DownloadWorker(
                     .build()
             ).execute()
 
-            // Non-2xx response: re-queue for retry (server error, auth failure,
-            // episode not available, etc.). Preserve progress so the user can
-            // see how far we got on the previous attempt.
+            // Non-2xx response or missing body: retry with exponential backoff up to
+            // MAX_DOWNLOAD_ATTEMPTS. On the final attempt, mark permanently failed.
             if (!response.isSuccessful) {
-                requeueOwnedDownload(
-                    preserveProgress = true,
-                    deletePartial = false
-                )
-                return@withContext Result.failure()
+                return@withContext retryOrFail(deletePartial = false)
             }
 
-            val body = response.body ?: run {
-                requeueOwnedDownload(
-                    preserveProgress = true,
-                    deletePartial = false
-                )
-                return@withContext Result.failure()
-            }
+            val body = response.body ?: return@withContext retryOrFail(deletePartial = false)
 
             // Determine total size for progress calculation. Priority:
             //   1. Content-Length from the HTTP response (most accurate)
@@ -384,19 +408,10 @@ class DownloadWorker(
 
             if (completedSuccessfully) Result.success() else Result.failure()
         } catch (e: Exception) {
-            // Unexpected error (network blip, disk full, etc.). Preserve the
-            // progress percentage so the UI can show how far the download got
-            // before failing.
+            // Unexpected error (network blip, disk full, etc.). Retry with backoff
+            // up to MAX_DOWNLOAD_ATTEMPTS; permanently fail after that.
             e.printStackTrace()
-
-            if (!completedSuccessfully) {
-                requeueOwnedDownload(
-                    preserveProgress = true,
-                    deletePartial = true
-                )
-            }
-
-            if (completedSuccessfully) Result.success() else Result.failure()
+            if (completedSuccessfully) Result.success() else retryOrFail(deletePartial = true)
         }
     }
 }
