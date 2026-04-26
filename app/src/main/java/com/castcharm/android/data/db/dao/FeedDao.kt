@@ -1,17 +1,24 @@
 package com.castcharm.android.data.db.dao
 
+// DAO for the feeds table. FeedRepository is the primary writer; Compose screens
+// observe feeds via the Flow-returning queries. FeedListViewModel and DashboardViewModel
+// are the main readers.
+
 import androidx.room.*
 import com.castcharm.android.data.db.entities.FeedEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface FeedDao {
+    // INSERT OR REPLACE: used for initial population where we know no episodes exist yet.
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(feeds: List<FeedEntity>)
 
-    // Use upsert for refreshes — INSERT OR REPLACE deletes the row first, triggering
-    // ON DELETE CASCADE on episodes and wiping local_path for all downloaded files.
-    // @Upsert performs an in-place update that does not delete the existing row.
+    // @Upsert for refreshes: performs an in-place UPDATE when the row already exists,
+    // rather than DELETE + INSERT. Using INSERT OR REPLACE would delete the feed row
+    // first, which triggers the ON DELETE CASCADE FK and wipes all episodes for that
+    // feed — including their local_path values for downloaded files. @Upsert avoids
+    // this destructive cascade entirely.
     @Upsert
     suspend fun upsertAll(feeds: List<FeedEntity>)
 

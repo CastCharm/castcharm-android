@@ -1,5 +1,11 @@
 package com.castcharm.android.ui.shared_components
 
+// Shared reconnect button components used across multiple screens.
+// Both variants disable themselves while the reconnect is in flight (inFlight=true)
+// and swap their icon/label for a spinner + "Reconnecting..." text, so the user
+// gets consistent visual feedback regardless of which screen they triggered the
+// reconnect from. The AppSessionManager drives the inFlight state.
+
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,6 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
+// Compact icon-button variant used in top app bars where space is limited.
+// While inFlight, the icon is replaced by a small CircularProgressIndicator
+// and the button is disabled to prevent double-tapping.
 @Composable
 fun ReconnectIconButton(
     onClick: () -> Unit,
@@ -42,6 +51,10 @@ fun ReconnectIconButton(
     }
 }
 
+// Full-width outlined button variant used inside OfflineModePanel and similar
+// card-based contexts. While inFlight, a spinner appears to the left of the
+// "Reconnecting..." label. The button is disabled so only one reconnect attempt
+// can be in progress at a time.
 @Composable
 fun ReconnectOutlinedButton(
     onClick: () -> Unit,

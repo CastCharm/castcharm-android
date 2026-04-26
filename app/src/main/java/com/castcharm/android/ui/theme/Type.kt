@@ -6,6 +6,19 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
+// This file defines the app-wide typography scale used by CastCharmTheme.
+// FontFamily.SansSerif matches the system sans-serif font on each device,
+// mirroring the web app's clean system-font-stack feel without bundling a
+// custom typeface. CastCharmTheme scales every style by the user's fontScale
+// preference at runtime, so no sp values here should be hard-coded in UI code.
+//
+// Style hierarchy:
+//   display*    — large hero text, not commonly used in this app
+//   headline*   — section headers and screen titles
+//   title*      — card titles, list headers, dialog headings
+//   body*       — paragraph and list content
+//   label*      — compact metadata, badges, and button labels
+
 // We match the web app's system font stack feel — clean, modern sans-serif
 val AppTypography = Typography(
     displayLarge = TextStyle(

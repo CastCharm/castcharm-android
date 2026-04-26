@@ -1,5 +1,12 @@
 package com.castcharm.android.ui.feeds
 
+// FeedListViewModel drives the Podcasts tab. It:
+//   - Continuously observes the feeds table via getAllFeeds() Flow so any server-side
+//     change (new feed added from web UI, feed deleted) is reflected in real time.
+//   - Immediately triggers a server refresh on init and on explicit pull-to-refresh.
+//   - Provides a repositoryOrNull() guard so refresh is silently skipped while
+//     offline or before ApiClient is initialized.
+
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -31,6 +38,8 @@ class FeedListViewModel : ViewModel() {
         loadFeeds()
     }
 
+    // Returns null when the ApiClient hasn't been initialized yet (e.g., first-run
+    // before server URL is configured). Callers that get null skip the network call.
     private fun repositoryOrNull(): FeedRepository? {
         return if (CastCharmApp.apiClient.isInitialized) {
             FeedRepository(
@@ -43,6 +52,8 @@ class FeedListViewModel : ViewModel() {
     }
 
     private fun loadFeeds() {
+        // collectLatest cancels the previous collection when a new emission arrives,
+        // ensuring only the most recent feed list is reflected in the UI state.
         viewModelScope.launch {
             Log.d("FeedListViewModel", "Starting collection of feeds from DB")
             db.feedDao().getAllFeeds().collectLatest { feeds ->
@@ -56,6 +67,7 @@ class FeedListViewModel : ViewModel() {
             }
         }
 
+        // Kick off a server refresh immediately so first launch is up-to-date.
         refreshFeeds()
     }
 

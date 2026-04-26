@@ -18,14 +18,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
+// LoginScreen is shown when AppSessionManager reports NotLoggedIn. It collects
+// three inputs (server URL, username, password) and delegates to LoginViewModel.login().
+// Navigation away happens via onLoginSuccess() which is passed from CastCharmNavigation.
 @Composable
 fun LoginScreen(
     viewModel: LoginViewModel = viewModel(),
     onLoginSuccess: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    // showPassword is UI-only state — stored with remember so it survives
+    // recomposition but is not persisted (intentional: always starts hidden).
     var showPassword by remember { mutableStateOf(false) }
 
+    // Navigate away as soon as LoginViewModel signals success. Using LaunchedEffect
+    // rather than a direct call prevents side effects during composition.
     LaunchedEffect(uiState.isLoggedIn) {
         if (uiState.isLoggedIn) {
             onLoginSuccess()
@@ -161,7 +168,10 @@ fun LoginScreen(
     }
 }
 
+// Returns true for blank input (don't flag an empty field as invalid — just
+// disable the login button). Returns true only for http/https URLs so the
+// error hint is shown for obviously wrong values like "192.168.1.100:8000".
 private fun isValidUrl(url: String): Boolean {
-    if (url.isBlank()) return true // Don't flag empty as invalid
+    if (url.isBlank()) return true
     return url.startsWith("http://") || url.startsWith("https://")
 }

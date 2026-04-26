@@ -1,5 +1,13 @@
 package com.castcharm.android.data.api.models
 
+// EpisodeOut is the Moshi-deserialized response body from the episode list and
+// individual episode endpoints. Field names match the server's JSON keys exactly
+// so no @Json annotations are needed.
+//
+// Nullable fields reflect optional RSS data (not all podcasts provide every field).
+// Server-side status values: "pending" | "queued" | "downloading" | "downloaded" | "failed" | "skipped"
+// file_path and file_size refer to SERVER-side storage, not the Android device.
+// seq_number is the episode's position within the feed (recalculated on the server).
 data class EpisodeOut(
     val id: Int,
     val feed_id: Int,

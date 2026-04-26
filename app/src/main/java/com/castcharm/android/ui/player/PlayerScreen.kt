@@ -1,4 +1,18 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// PlayerScreen is a full-screen player launched by tapping the MiniPlayerBar.
+// It shows the episode artwork, title, feed, playback controls (back 30s, play/pause,
+// forward 30s), a scrubber with position and duration, a speed picker, sleep timer,
+// and a "Mark as played" button.
+//
+// State comes from two sources:
+//   - PlayerViewModel.uiState: episode metadata, feed, played state, sleep timer
+//   - PlayerController.playbackState (via ViewModel): position, duration, isPlaying
+//
+// justMarkedPlayed: when the user taps "Mark as played", the screen auto-closes
+// via a LaunchedEffect watching this flag. consumeJustMarkedPlayed() clears it.
+//
+// The scrubber uses the live positionMs from PlaybackUiState and seeks on
+// onValueChangeFinished rather than on every drag event to avoid flooding ExoPlayer.
 package com.castcharm.android.ui.player
 
 import androidx.compose.foundation.background
@@ -207,7 +221,7 @@ fun PlayerScreen(
                         onSpeedChange = { viewModel.setPlaybackSpeed(it) },
                         isPlayed = episode.played,
                         onMarkPlayed = { viewModel.markPlayed() },
-                        sleepTimerActive = uiState.sleepTimerMinutes > 0,
+                        sleepTimerRemainingMs = uiState.sleepTimerRemainingMs,
                         onSleepTimer = { viewModel.startSleepTimer(it) },
                         onStop = {
                             viewModel.stop()
@@ -421,7 +435,7 @@ fun SecondaryControls(
     onSpeedChange: (Float) -> Unit = {},
     isPlayed: Boolean,
     onMarkPlayed: () -> Unit = {},
-    sleepTimerActive: Boolean,
+    sleepTimerRemainingMs: Long = 0L,
     onSleepTimer: (Int) -> Unit = {},
     onStop: () -> Unit = {}
 ) {
@@ -482,6 +496,7 @@ fun SecondaryControls(
         }
 
         Box {
+            val sleepTimerActive = sleepTimerRemainingMs > 0L
             OutlinedButton(
                 onClick = { showSleepMenu = true },
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
@@ -497,7 +512,11 @@ fun SecondaryControls(
                     }
                 )
                 Spacer(Modifier.width(4.dp))
-                Text("Sleep", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = if (sleepTimerActive) formatTime(sleepTimerRemainingMs / 1000) else "Sleep",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (sleepTimerActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
             }
 
             DropdownMenu(

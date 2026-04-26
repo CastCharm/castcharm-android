@@ -1,5 +1,16 @@
 package com.castcharm.android
 
+// MainActivity is the single Activity that hosts the entire Compose UI. It:
+//   1. Schedules the hourly periodic SyncWorker via WorkManager on startup.
+//   2. Reads the theme mode and font scale from DataStore and applies them to
+//      CastCharmTheme so the whole UI re-renders when either preference changes.
+//   3. Renders CastCharmNavigation(), which owns auth-state routing and the
+//      full NavHost for all screens.
+//
+// Screen is a sealed class rather than an enum so each variant can supply its
+// own @Composable Icon function (which lets Downloads swap its icon for an
+// animated spinner while downloads are active).
+
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -96,6 +107,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
+// Each bottom-nav tab is a Screen subclass. The abstract Icon composable is
+// overridden per-object so Downloads can show DownloadIconWithProgress instead
+// of a static icon. The isDownloading parameter is only meaningful for Downloads.
 sealed class Screen(val route: String, val label: String) {
     @Composable
     abstract fun Icon(isDownloading: Boolean)
@@ -114,6 +128,8 @@ sealed class Screen(val route: String, val label: String) {
         }
     }
 
+    // Downloads swaps its icon for an animated spinner while any WorkManager
+    // download is in progress, giving the user a persistent activity indicator.
     data object Downloads : Screen("downloads", "Downloads") {
         @Composable
         override fun Icon(isDownloading: Boolean) {
@@ -133,6 +149,7 @@ sealed class Screen(val route: String, val label: String) {
     }
 }
 
+// Ordered list of bottom-nav tabs. The order determines their left-to-right position.
 val bottomNavItems = listOf(
     Screen.Dashboard,
     Screen.Feeds,
@@ -140,6 +157,7 @@ val bottomNavItems = listOf(
     Screen.Settings
 )
 
+// DataStore keys for appearance preferences written by SettingsScreen.
 val THEME_KEY = stringPreferencesKey("theme_mode")
 val FONT_SCALE_KEY = floatPreferencesKey("font_scale")
 
@@ -147,6 +165,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Schedule the hourly SyncWorker. KEEP policy means if a periodic work
+        // is already enqueued (e.g., from a previous app launch), it is not
+        // replaced — we don't want to reset the 1-hour interval every cold start.
         val syncRequest = PeriodicWorkRequestBuilder<com.castcharm.android.sync.SyncWorker>(
             1,
             TimeUnit.HOURS
@@ -165,6 +186,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             val dataStore = CastCharmApp.instance.dataStore
 
+            // Collect theme and font-scale preferences from DataStore. Both are
+            // mapped to a Flow so the UI automatically re-renders when the user
+            // changes them in Settings without needing to restart the app.
             val themeMode by remember(dataStore) {
                 dataStore.data.map { it[THEME_KEY] ?: "system" }
             }.collectAsState(initial = "system")
@@ -173,6 +197,8 @@ class MainActivity : ComponentActivity() {
                 dataStore.data.map { it[FONT_SCALE_KEY] ?: 1.0f }
             }.collectAsState(initial = 1.0f)
 
+            // Resolve themeMode string to a boolean for CastCharmTheme.
+            // "system" defers to the OS dark-mode setting.
             val darkTheme = when (themeMode) {
                 "light" -> false
                 "dark" -> true
@@ -191,11 +217,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Root composable for the app. Owns auth state routing, the "server unreachable"
+// offline prompt dialog, session event handling, and the reconnect error snackbar.
+// The NavHost and bottom navigation live inside MainScaffold (shown when LoggedIn).
 @Composable
 fun CastCharmNavigation() {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
 
+    // Observe auth and connectivity state from AppSessionManager.
     val connectivityMode by CastCharmApp.connectivityMode.collectAsState()
     val authState by CastCharmApp.authState.collectAsState()
     val reconnectInFlight by CastCharmApp.reconnectInFlight.collectAsState()
@@ -204,6 +234,10 @@ fun CastCharmNavigation() {
     var showRuntimeOfflinePrompt by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // The offline prompt is debounced by 1.8s so a brief transient error (e.g.,
+    // a single failed request that resolves immediately) doesn't flash the dialog.
+    // pendingOfflinePromptJob holds the pending coroutine so it can be cancelled
+    // if conditions change before the delay expires.
     var pendingOfflinePromptJob by remember { mutableStateOf<Job?>(null) }
     val offlinePromptDelayMs = 1800L
 
@@ -217,6 +251,9 @@ fun CastCharmNavigation() {
         showRuntimeOfflinePrompt = false
     }
 
+    // Schedule the offline prompt dialog after a short delay. Multiple guards prevent
+    // scheduling when: the user isn't fully logged in online, a reconnect is already
+    // in flight, the dialog is already showing, or a pending schedule exists.
     fun scheduleOfflinePromptIfNeeded() {
         if (
             authState != AppAuthState.LoggedIn ||
@@ -231,6 +268,8 @@ fun CastCharmNavigation() {
         pendingOfflinePromptJob = scope.launch {
             delay(offlinePromptDelayMs)
 
+            // Re-check conditions after the delay — they may have changed
+            // (e.g., the server became reachable again during the wait).
             val stillEligible =
                 authState == AppAuthState.LoggedIn &&
                         connectivityMode == AppConnectivityMode.ONLINE &&
@@ -244,6 +283,7 @@ fun CastCharmNavigation() {
         }
     }
 
+    // Dismisses the dialog (if showing) and fires a reconnect attempt.
     fun reconnectNow() {
         scope.launch {
             hideOfflinePrompt()
@@ -251,10 +291,15 @@ fun CastCharmNavigation() {
         }
     }
 
+    // Kick off the startup auth check (checks DataStore for a saved URL and
+    // pings the server). The result transitions authState out of Checking.
     LaunchedEffect(Unit) {
         CastCharmApp.refreshSessionState()
     }
 
+    // Dismiss the offline prompt whenever the user navigates away from the
+    // LoggedIn+Online state (e.g., they manually entered offline mode or the
+    // reconnect succeeded and cleared authState).
     LaunchedEffect(authState, connectivityMode, reconnectInFlight) {
         val shouldSuppressPrompt =
             authState != AppAuthState.LoggedIn ||
@@ -266,6 +311,9 @@ fun CastCharmNavigation() {
         }
     }
 
+    // Collect one-shot events from AppSessionManager and react to them.
+    // ServerUnreachable → schedule the offline prompt dialog.
+    // AuthInvalid → dismiss any prompt (the Login screen will appear instead).
     LaunchedEffect(Unit) {
         CastCharmApp.sessionEvents.collect { event ->
             when (event) {
@@ -280,6 +328,9 @@ fun CastCharmNavigation() {
         }
     }
 
+    // Show reconnect error messages (e.g., "Unable to reconnect") as snackbars.
+    // The message is cleared from AppSessionManager after it's shown so it
+    // doesn't re-appear on the next recomposition.
     LaunchedEffect(reconnectErrorMessage) {
         reconnectErrorMessage?.let { message ->
             hideOfflinePrompt()
@@ -288,8 +339,12 @@ fun CastCharmNavigation() {
         }
     }
 
+    // ---- Root composable tree ------------------------------------------------
+    // A Box allows the offline prompt dialog and snackbar to float above the
+    // current auth-state screen without nesting inside a Scaffold.
     Box(modifier = Modifier.fillMaxSize()) {
         when (val state = authState) {
+            // Startup check in progress — show a centred spinner.
             AppAuthState.Checking -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -300,6 +355,7 @@ fun CastCharmNavigation() {
                 }
             }
 
+            // No saved URL or server auth rejected — show the Login screen.
             AppAuthState.NotLoggedIn -> {
                 LoginScreen(
                     onLoginSuccess = {
@@ -310,6 +366,7 @@ fun CastCharmNavigation() {
                 )
             }
 
+            // Server unreachable but the user has logged in before — offer offline mode.
             is AppAuthState.OfflineAvailable -> {
                 OfflineModeEntryScreen(
                     serverUrl = state.serverUrl,
@@ -328,6 +385,8 @@ fun CastCharmNavigation() {
                 )
             }
 
+            // Fully logged in (online or offline) — show the main scaffold with
+            // NavHost and bottom navigation.
             AppAuthState.LoggedIn -> {
                 MainScaffold(
                     navController = navController,
@@ -344,6 +403,9 @@ fun CastCharmNavigation() {
             }
         }
 
+        // The runtime offline alert dialog floats above MainScaffold. It is only
+        // shown when the server becomes unreachable during an active logged-in session
+        // (not during the entry screen flow, which has its own UI for this case).
         if (
             showRuntimeOfflinePrompt &&
             authState == AppAuthState.LoggedIn &&
@@ -441,6 +503,10 @@ private fun OfflineModeEntryScreen(
     }
 }
 
+// Renders the Downloads tab icon. When isDownloading=true, a thin circular
+// progress ring surrounds a smaller download arrow, giving a compact activity
+// indicator without requiring a badge or counter. The arrow shrinks from 24dp
+// to 14dp when active so the ring has room to show around it.
 @Composable
 fun DownloadIconWithProgress(isDownloading: Boolean) {
     Box(
@@ -464,6 +530,9 @@ fun DownloadIconWithProgress(isDownloading: Boolean) {
     }
 }
 
+// Main scaffold: NavHost + bottom nav bar + mini player bar. Shown when the user
+// is fully logged in. Owns the per-screen ViewModel lifecycle via DisposableEffect
+// observers that trigger refreshes on ON_RESUME.
 @Composable
 fun MainScaffold(
     navController: androidx.navigation.NavHostController,
@@ -478,8 +547,12 @@ fun MainScaffold(
     val playerController = CastCharmApp.playerController
     val playbackUiState by playerController.playbackState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    // Integer token incremented every time the Downloads tab becomes visible,
+    // used to trigger a fresh DownloadsViewModel observation when re-entering.
     var downloadsRefreshToken by remember { mutableIntStateOf(0) }
 
+    // Forward ShowMessage events from the player (e.g., "Cannot stream offline")
+    // to the snackbar host so they appear over the current screen.
     LaunchedEffect(playerController) {
         playerController.events.collect { event ->
             when (event) {
@@ -490,17 +563,23 @@ fun MainScaffold(
         }
     }
 
+    // Observe in-progress episodes from the DB to drive the Downloads tab spinner.
+    // The DB query is always-on so the spinner appears/disappears in real time.
     val db = remember { AppDatabase.getDatabase(CastCharmApp.instance) }
     val inProgressEpisodes by db.episodeDao().getInProgressEpisodes()
         .collectAsState(initial = emptyList())
     val isAnyDownloadInProgress = inProgressEpisodes.isNotEmpty()
 
+    // Bottom nav is shown on all main tabs and the episode list screen (nested
+    // under Feeds). It is hidden on the full-screen player route.
     val showBottomBar =
         currentRoute in listOf("dashboard", "feeds", "downloads", "settings") ||
                 currentRoute?.startsWith("episodes/") == true
 
     val isOnPlayerRoute = currentRoute == "player"
 
+    // Mini player bar is shown whenever media is loaded and we're not already on
+    // the full-screen player route (to avoid a redundant playback bar).
     val showMiniPlayer =
         playbackUiState.hasMedia &&
                 playbackUiState.episodeId != null &&
@@ -519,6 +598,11 @@ fun MainScaffold(
                     startDestination = "dashboard",
                     modifier = Modifier.fillMaxSize()
                 ) {
+                    // ---- Dashboard route -------------------------------------
+                    // DisposableEffect observes the back-stack entry's lifecycle
+                    // so refresh() is called when the user returns from another tab
+                    // or navigates back from the episode list. The isOfflineMode
+                    // guard prevents network calls while offline.
                     composable("dashboard") { backStackEntry ->
                         val dashVm: DashboardViewModel = viewModel()
 
@@ -580,6 +664,11 @@ fun MainScaffold(
                         )
                     }
 
+                    // ---- Downloads route -------------------------------------
+                    // No ViewModel at this level — DownloadsScreen manages its own
+                    // ViewModel internally. The refreshToken increment on ON_RESUME
+                    // is passed down to DownloadsScreen so it can re-trigger its
+                    // internal observation when the tab becomes active.
                     composable("downloads") { backStackEntry ->
                         DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
                             val observer = LifecycleEventObserver { _, event ->
@@ -622,6 +711,10 @@ fun MainScaffold(
                         )
                     }
 
+                    // ---- Episode list route ----------------------------------
+                    // The feedId is extracted from the route path argument and used
+                    // as the ViewModel key so each feed gets its own ViewModel instance
+                    // in the ViewModelStore (preventing state bleed between feeds).
                     composable("episodes/{feedId}") { backStackEntry ->
                         val feedId = backStackEntry.arguments?.getString("feedId")?.toIntOrNull() ?: 0
                         val vm = viewModel<EpisodeListViewModel>(key = "episodes_$feedId") {
@@ -670,10 +763,14 @@ fun MainScaffold(
                 }
             }
 
+            // ---- Bottom chrome (mini player + nav bar) -----------------------
             if (showBottomBar) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
+                    // Mini player bar sits directly above the nav bar when media is active.
+                    // It shows the episode title, feed name, artwork, a progress bar, and
+                    // a play/pause button. Tapping anywhere on the bar opens the full player.
                     if (showMiniPlayer) {
                         MiniPlayerBar(
                             episodeTitle = playbackUiState.title ?: "",
@@ -704,6 +801,11 @@ fun MainScaffold(
 
                     NavigationBar {
                         bottomNavItems.forEach { screen ->
+                            // Determine if this tab is "selected" by checking whether any
+                            // destination in the back stack hierarchy matches the route.
+                            // The Feeds tab is also selected when the episode list (a child
+                            // of Feeds) is active, so the Feeds icon stays highlighted while
+                            // browsing episodes.
                             val selected =
                                 navBackStackEntry?.destination?.hierarchy?.any {
                                     it.route == screen.route
@@ -757,6 +859,9 @@ fun MainScaffold(
     }
 }
 
+// Compact persistent playback bar shown above the bottom nav while an episode is
+// playing. Tapping the bar opens the full PlayerScreen. The play/pause button
+// shows a buffering spinner when ExoPlayer is in the buffering state.
 @Composable
 fun MiniPlayerBar(
     episodeTitle: String,
@@ -775,6 +880,9 @@ fun MiniPlayerBar(
         modifier = modifier
     ) {
         Column {
+            // 2dp progress bar at the very top of the mini player bar, mirroring
+            // the episode list progress bar. coerceIn prevents rendering artifacts
+            // if the position overshoots the duration by a small amount.
             LinearProgressIndicator(
                 progress = { progress.coerceIn(0f, 1f) },
                 modifier = Modifier
@@ -784,6 +892,9 @@ fun MiniPlayerBar(
                 trackColor = MaterialTheme.colorScheme.surfaceVariant
             )
 
+            // Content row: optional artwork | episode + feed title | play-pause button.
+            // The entire row is clickable to open the full player, but the play/pause
+            // button intercepts its own click without bubbling to the row handler.
             androidx.compose.foundation.layout.Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -791,6 +902,8 @@ fun MiniPlayerBar(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Artwork is only shown when a URI is available; the column fills the
+                // remaining space with episode/feed title either way.
                 if (!artworkUri.isNullOrBlank()) {
                     AsyncImage(
                         model = artworkUri,
@@ -805,6 +918,9 @@ fun MiniPlayerBar(
                     Spacer(Modifier.size(12.dp))
                 }
 
+                // Episode title (primary) and feed name (secondary), both capped at
+                // 1 line with ellipsis so the bar height stays fixed regardless of
+                // title length.
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = episodeTitle,
@@ -823,6 +939,9 @@ fun MiniPlayerBar(
 
                 Spacer(Modifier.size(8.dp))
 
+                // 40dp button area. Shows a spinner while buffering; shows the
+                // play/pause icon otherwise. The spinner replaces the button entirely
+                // so the user knows tapping is not meaningful while buffering.
                 Box(
                     modifier = Modifier.size(40.dp),
                     contentAlignment = Alignment.Center

@@ -1,4 +1,25 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// SettingsScreen and SettingsViewModel are co-located in this file (unlike most other screens)
+// because the ViewModel is simple enough that splitting files adds no value.
+//
+// SettingsViewModel manages six settings, all backed by DataStore or live device queries:
+//   - quotaGb: max server-side storage limit (from GlobalSettings API)
+//   - usedBytes: current phone-side download usage (from StorageManager)
+//   - totalDeviceStorageBytes / availableDeviceStorageBytes: raw device storage
+//   - themeMode: "system" / "light" / "dark" (DataStore THEME_KEY)
+//   - fontScale: 0.85–1.3 font size multiplier (DataStore)
+//   - maxConcurrentDownloads: 1–5 parallel download slots (DataStore MAX_CONCURRENT_DOWNLOADS_KEY)
+//   - isClearing: true while the clear-all-downloads wipe is in progress
+//   - serverVersion: version string from GET /api/status, shown in the Server card
+//
+// SettingsScreen renders a scrollable Column with:
+//   1. Storage usage bar — quota + phone usage + available space
+//   2. Theme picker — system / light / dark chips
+//   3. Font scale slider — visual size preview
+//   4. Max concurrent downloads stepper — +/- buttons
+//   5. Clear all downloads — destructive action with confirmation dialog
+//   6. Server info card — URL + logout button
+//   7. Offline mode panel — replaces most content when offline
 package com.castcharm.android.ui.settings
 
 import androidx.compose.foundation.background
@@ -43,6 +64,7 @@ data class SettingsUiState(
     val totalDeviceStorageBytes: Long = 0,
     val availableDeviceStorageBytes: Long = 0,
     val serverUrl: String = "",
+    val serverVersion: String = "",
     val themeMode: String = "system",
     val fontScale: Float = 1.0f,
     val maxConcurrentDownloads: Int = DEFAULT_MAX_CONCURRENT_DOWNLOADS,
@@ -84,12 +106,19 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
             val totalSpace = externalDir.totalSpace
             val availableSpace = externalDir.usableSpace
 
+            val serverVersion = if (CastCharmApp.apiClient.isInitialized) {
+                try { CastCharmApp.apiClient.getApi().getStatus().version } catch (_: Exception) { "" }
+            } else {
+                ""
+            }
+
             _uiState.value = _uiState.value.copy(
                 usedBytes = used,
                 quotaGb = quotaBytes / (1024 * 1024 * 1024),
                 totalDeviceStorageBytes = totalSpace,
                 availableDeviceStorageBytes = availableSpace,
                 serverUrl = serverUrl,
+                serverVersion = serverVersion,
                 themeMode = themeMode,
                 fontScale = fontScale,
                 maxConcurrentDownloads = maxConcurrentDownloads
@@ -232,6 +261,14 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        if (uiState.serverVersion.isNotBlank()) {
+                            Text(
+                                text = "Server version ${uiState.serverVersion}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
 
                         if (isOfflineMode) {
                             AssistChip(

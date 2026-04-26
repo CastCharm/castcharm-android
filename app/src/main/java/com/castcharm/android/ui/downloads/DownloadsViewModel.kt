@@ -1,5 +1,23 @@
 package com.castcharm.android.ui.downloads
 
+// DownloadsViewModel drives the Downloads tab. It tracks two categories of downloads:
+//   - Phone downloads: episodes being downloaded to this device (via WorkManager / DownloadWorker)
+//   - Server downloads: episodes being downloaded on the CastCharm server (queued/downloading status)
+//
+// The download state is built by combining four Room Flows (downloaded, inProgress, feeds, downloadRows)
+// so any DB change (progress update, download completion, cancellation) triggers a recompose.
+//
+// Live progress for phone downloads comes from polling WorkManager's WorkInfo every 1 second.
+// lastKnownPhoneProgress caches the most recent DownloadProgressUi per episode so that
+// progress doesn't reset to zero between WorkManager polling cycles (avoids flickering).
+//
+// Server status is polled every 5 seconds via the API when server downloads are visible.
+// Both polling jobs are started/stopped reactively: if there are no active downloads,
+// the jobs are cancelled to avoid unnecessary work.
+//
+// The "current feed" slice concept: when the user drills into a specific feed,
+// currentFeed* fields show only that feed's episodes/downloads.
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
@@ -240,6 +258,9 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
+    // Combines four DB Flows so any change to downloads, episodes, feeds, or
+    // download rows triggers a single recomputation of the full UI state.
+    // This avoids N separate collectors that could emit interleaved partial updates.
     private fun observeDownloads() {
         viewModelScope.launch {
             _uiState.update { it.copy(isInitialLoading = true, isRefreshing = true) }
@@ -253,15 +274,23 @@ class DownloadsViewModel : ViewModel() {
                 val feedMap = allFeeds.associateBy { it.id }
                 val phoneRowsByEpisodeId = allDownloadRows.associateBy { it.episode_id }
                 val phoneEpisodeIds = phoneRowsByEpisodeId.keys
+                // Server-side in-progress downloads are hidden while offline so the
+                // UI doesn't show stale "Downloading on server" items.
                 val hideServerInProgress = CastCharmApp.isOfflineMode
                 val inProgressMap = inProgress.associateBy { it.id }
 
+                // Group downloaded episodes by feed so the sidebar shows a per-feed
+                // download count. Creates a synthetic FeedEntity for orphaned episodes
+                // whose feed row was pruned from the local DB.
                 val downloadedByFeed = downloaded.groupBy { it.feed_id }
                 val downloadedFeeds = downloadedByFeed.map { (feedId, eps) ->
                     val feed = feedMap[feedId]
                     if (feed != null) {
                         FeedDownloadItem(feed, eps.size)
                     } else {
+                        // Feed row missing locally (e.g., feed was deleted on server
+                        // but episode files are still on device). Synthesize a minimal
+                        // FeedEntity so the UI can still display the feed group.
                         val firstEp = eps.firstOrNull()
                         FeedDownloadItem(
                             FeedEntity(
@@ -375,6 +404,10 @@ class DownloadsViewModel : ViewModel() {
         return Triple(downloaded, phone, server)
     }
 
+    // Builds an initial DownloadProgressUi from the DB row before WorkManager
+    // has emitted its first progress update. Takes the max of the episode's
+    // stored download_progress and the download row's progress_pct to avoid
+    // showing 0% when we already know how far a previous session got.
     private fun seedPhoneProgressFromRow(
         row: DownloadEntity,
         episode: EpisodeEntity
@@ -389,6 +422,7 @@ class DownloadsViewModel : ViewModel() {
             0L
         }
 
+        // null work_request_id means the row exists but no worker has been dispatched yet.
         val status = when {
             row.work_request_id.isNullOrBlank() -> "Queued"
             percent >= 100 -> "Finishing"
@@ -681,11 +715,20 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
+    // Extension that converts a WorkManager WorkInfo into a DownloadProgressUi.
+    // Returns null for CANCELLED/FAILED states so the caller can fall back to
+    // the lastKnownPhoneProgress cache rather than showing a stale final state.
+    //
+    // Progress percentage: takes the max of three sources to avoid flickering
+    // backwards: the WorkInfo progress_percent key, the value computed from
+    // bytes_downloaded / total_bytes, and the DB episode's stored percentage.
     private fun WorkInfo.toProgressUi(ep: EpisodeEntity): DownloadProgressUi? {
         if (state == WorkInfo.State.CANCELLED || state == WorkInfo.State.FAILED) {
             return null
         }
 
+        // Use content-length from the response if available; fall back to the
+        // RSS enclosure_length from the DB; if neither, show 0 (unknown total).
         val fallbackTotalBytes = ep.enclosure_length ?: 0L
         val rawTotalBytes = progress.getLong("total_bytes", -1L)
         val totalBytes = when {
@@ -705,6 +748,7 @@ class DownloadsViewModel : ViewModel() {
             else -> -1
         }
 
+        // Take the max so the displayed percentage can only go forward, never back.
         val percent = maxOf(
             pctFromProgress.coerceAtLeast(-1),
             pctFromBytes,

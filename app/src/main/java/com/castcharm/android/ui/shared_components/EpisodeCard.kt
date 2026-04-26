@@ -1,5 +1,16 @@
 package com.castcharm.android.ui.shared_components
 
+// EpisodeCard is the shared expandable episode row used in EpisodeListScreen,
+// DashboardScreen, and DownloadsScreen. It handles the full episode interaction
+// surface: artwork, title, metadata row (date / duration / download indicator /
+// resume badge), a 2dp progress bar, and an animated action panel that expands on
+// tap to show Play / Mark Played / download action buttons and the episode description.
+//
+// The download state is abstracted through EpisodeDownloadActionOverride so callers
+// from different screens can inject the correct state without re-deriving it here.
+// When no override is provided, the card derives the state from the episode entity
+// fields directly (local_path, status).
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -59,6 +70,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// The seven possible download states an episode can be in from the app's perspective.
+// ON_PHONE        — audio file is saved on this device (local_path != null)
+// SAVE_TO_PHONE   — file is on the server (status=downloaded) but not yet on this device
+// PHONE_IN_PROGRESS — WorkManager is actively downloading to this device
+// SERVER_DOWNLOADING — the server is actively downloading from the RSS source
+// SERVER_QUEUED   — the server has the episode queued for download
+// SAVE_TO_SERVER  — episode is not downloaded anywhere; only the metadata exists
+// RETRY_SERVER    — a previous server-side download attempt failed
 enum class EpisodeDownloadActionOverride {
     ON_PHONE,
     SAVE_TO_PHONE,
@@ -86,17 +105,27 @@ fun EpisodeCard(
     onDeleteFromPhone: (() -> Unit)? = null,
     downloadActionOverride: EpisodeDownloadActionOverride? = null
 ) {
+    // Resolve artwork URL through a four-level fallback chain:
+    // 1. Episode-specific custom image (set by the user or override)
+    // 2. Episode-level image from the RSS feed entry
+    // 3. feedImageUrl passed in by the caller (e.g., from the joined feed record)
+    // 4. Feed-level image stored denormalized on the episode entity
+    // 5. Constructed server cover URL (requires a valid baseUrl)
     val imageUrl = episode.custom_image_url
         ?: episode.episode_image_url
         ?: feedImageUrl
         ?: episode.feed_image_url
         ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${episode.feed_id}/cover.jpg" else null
 
+    // Determine the server-side download state. local_path is checked alongside status
+    // because a phone download sets local_path independently of the server status field.
     val isAvailableOnServer = episode.status == "downloaded" && episode.local_path == null
     val isServerQueued = episode.local_path == null && episode.status == "queued"
     val isServerDownloading = episode.local_path == null && episode.status == "downloading"
     val isServerFailed = episode.local_path == null && episode.status == "failed"
 
+    // Use the caller-supplied override if present (e.g., DownloadsScreen injects
+    // PHONE_IN_PROGRESS based on WorkManager state). Otherwise derive from entity fields.
     val actionState = downloadActionOverride ?: when {
         episode.local_path != null -> EpisodeDownloadActionOverride.ON_PHONE
         isAvailableOnServer -> EpisodeDownloadActionOverride.SAVE_TO_PHONE
@@ -106,6 +135,8 @@ fun EpisodeCard(
         else -> EpisodeDownloadActionOverride.SAVE_TO_SERVER
     }
 
+    // The card background changes to primaryContainer when the episode is in
+    // multi-select mode (isSelected=true), giving a clear selection highlight.
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -117,6 +148,10 @@ fun EpisodeCard(
         }
     ) {
         Column {
+            // ---- Collapsed header row ----------------------------------------
+            // Always visible. Tap toggles the expanded panel; long-press activates
+            // multi-select mode (onLongPress is null if multi-select is disabled
+            // for this context, e.g., the dashboard "Continue Listening" section).
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -138,6 +173,9 @@ fun EpisodeCard(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
+                    // Episode title. Unplayed episodes render in SemiBold with full
+                    // opacity; played episodes are dimmed to 60% and Normal weight to
+                    // visually distinguish the backlog from already-heard content.
                     Text(
                         text = episode.title,
                         style = MaterialTheme.typography.bodyMedium,
@@ -151,6 +189,9 @@ fun EpisodeCard(
                         }
                     )
 
+                    // Metadata row: date | duration | download state icon | resume badge.
+                    // Each element is only rendered when the data is available (e.g.,
+                    // duration is nullable, date may be absent for manually added episodes).
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -172,6 +213,8 @@ fun EpisodeCard(
                             )
                         }
 
+                        // Compact download state indicator: icon or spinner sized to 14dp
+                        // so it sits inline with the label text without dominating it.
                         when (actionState) {
                             EpisodeDownloadActionOverride.ON_PHONE -> {
                                 Icon(
@@ -237,6 +280,9 @@ fun EpisodeCard(
                             }
                         }
 
+                        // "Resume" badge shown when the episode has been partially played
+                        // but is not yet marked as done. Helps the user quickly identify
+                        // in-progress episodes in a long list.
                         if (episode.play_position_seconds > 0 && !episode.played) {
                             Badge(
                                 containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -248,6 +294,7 @@ fun EpisodeCard(
                     }
                 }
 
+                // Expand/collapse chevron aligned to the right edge of the row.
                 Icon(
                     if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                     contentDescription = if (expanded) "Collapse" else "Expand",
@@ -256,6 +303,9 @@ fun EpisodeCard(
                 )
             }
 
+            // 2dp playback progress bar at the bottom of the collapsed header row.
+            // Only shown when the user has started listening but hasn't finished.
+            // coerceIn guards against server data where position > duration.
             if (episode.play_position_seconds > 0 && episode.duration != null && episode.duration > 0) {
                 LinearProgressIndicator(
                     progress = { (episode.play_position_seconds.toFloat() / episode.duration).coerceIn(0f, 1f) },
@@ -267,6 +317,10 @@ fun EpisodeCard(
                 )
             }
 
+            // ---- Expandable action panel -------------------------------------
+            // Animates in/out using expandVertically/shrinkVertically so the list
+            // smoothly reflows without an abrupt jump. Contains the action buttons
+            // and episode description (which can itself be tapped to expand/collapse).
             AnimatedVisibility(
                 visible = expanded,
                 enter = expandVertically(),
@@ -275,10 +329,14 @@ fun EpisodeCard(
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     HorizontalDivider(modifier = Modifier.padding(bottom = 8.dp))
 
+                    // Action buttons row: Play/Resume, Mark Played, and one download
+                    // action button whose label and behaviour depend on actionState.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
+                        // Show "Resume" with an arrow icon if the user started listening;
+                        // show "Play" with a circle icon for unstarted episodes.
                         val hasProgress = episode.play_position_seconds > 0 && !episode.played
                         EpisodeActionButton(
                             icon = if (hasProgress) Icons.Default.PlayArrow else Icons.Default.PlayCircle,
@@ -286,6 +344,8 @@ fun EpisodeCard(
                             onClick = onPlay
                         )
 
+                        // Toggle played/unplayed. The icon and tint switch to signal the
+                        // current state — filled CheckCircle + primary colour when played.
                         EpisodeActionButton(
                             icon = if (episode.played) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
                             label = if (episode.played) "Played" else "Mark Played",
@@ -293,6 +353,7 @@ fun EpisodeCard(
                             onClick = onTogglePlayedStatus
                         )
 
+                        // Third button is context-sensitive based on the download state.
                         when (actionState) {
                             EpisodeDownloadActionOverride.ON_PHONE -> {
                                 if (onDeleteFromPhone != null) {
@@ -367,6 +428,12 @@ fun EpisodeCard(
 
                     }
 
+                    // Episode description section — only rendered when description exists.
+                    // The HTML from RSS feeds is stripped to plain text via stripHtml().
+                    // remember(episode.description) avoids re-running the Html parser on
+                    // every recomposition (only re-runs when the description content changes).
+                    // The description is initially clamped to 3 lines; tapping it toggles
+                    // full expansion without needing a separate "Show more" button.
                     if (!episode.description.isNullOrBlank()) {
                         val plainDesc = remember(episode.description) { stripHtml(episode.description) }
                         var descExpanded by remember { mutableStateOf(false) }
@@ -464,6 +531,10 @@ private fun EpisodeActionButton(
     }
 }
 
+// Convert an HTML string (from an RSS episode description) to plain text.
+// FROM_HTML_MODE_COMPACT preserves block-level line breaks (paragraphs, list items)
+// while stripping all markup tags. Consecutive blank lines are collapsed to at most
+// one blank line so the description doesn't have excessive vertical whitespace.
 fun stripHtml(html: String): String {
     return android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_COMPACT)
         .toString()
@@ -471,6 +542,10 @@ fun stripHtml(html: String): String {
         .replace(Regex("\n{3,}"), "\n\n")
 }
 
+// Format an episode duration in seconds to a concise human-readable string.
+// Episodes shorter than one hour show only minutes (e.g., "42m"); longer episodes
+// show hours and remaining minutes (e.g., "1h 23m"). Seconds are omitted because
+// podcast durations at that precision add visual noise without meaningful context.
 fun formatDuration(seconds: Int): String {
     val hours = seconds / 3600
     val minutes = (seconds % 3600) / 60
@@ -480,6 +555,9 @@ fun formatDuration(seconds: Int): String {
     }
 }
 
+// Format a Unix-epoch millisecond timestamp to a short locale-aware date string
+// (e.g., "Apr 25, 2026"). Returns empty string for null or zero (episodes where
+// the RSS feed did not supply a publication date).
 fun formatDate(publishedAt: Long?): String {
     if (publishedAt == null || publishedAt == 0L) return ""
     return SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(publishedAt))

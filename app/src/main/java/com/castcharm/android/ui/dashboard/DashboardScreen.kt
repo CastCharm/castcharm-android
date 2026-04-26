@@ -1,4 +1,16 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// DashboardScreen renders the Home tab. It is structured as a vertically scrolling
+// LazyColumn with multiple independently-loading sections:
+//   - Storage / stats bar (device quota + used bytes)
+//   - Feed health alerts (feeds with last_error set)
+//   - Continue Listening horizontal scroll (in-progress episodes)
+//   - Newest Episodes (recently server-downloaded)
+//   - Suggestion Buckets (< 15 min, 15–45 min, 45–90 min, 90+ min)
+//   - Top Backlog (feeds with most unplayed episodes)
+//
+// Each section shows a skeleton placeholder while its loading flag is true,
+// then fades into real content when data arrives. Sections are hidden in offline
+// mode if they require network data (suggestions, newest).
 package com.castcharm.android.ui.dashboard
 
 import com.castcharm.android.ui.shared_components.AppTopBarTitle

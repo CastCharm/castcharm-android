@@ -1,5 +1,15 @@
 package com.castcharm.android.ui.shared_components
 
+// Skeleton loading primitives — surfaceVariant-coloured placeholder shapes
+// displayed while data is being fetched. They are composable building blocks
+// rather than full-screen skeletons so each screen can assemble the exact
+// skeleton layout that matches its real content structure.
+//
+// None of these components animate (no shimmer). A static muted placeholder
+// is sufficient for the app's typical load times and avoids the extra
+// complexity of an animation loop. Screens show these during the initial
+// local-DB read before server data arrives.
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +31,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
+// Base primitive: an arbitrary-shaped, surfaceVariant-coloured filled box.
+// All other skeleton components delegate to this one.
 @Composable
 fun SkeletonBlock(
     modifier: Modifier = Modifier,
@@ -35,6 +47,9 @@ fun SkeletonBlock(
     )
 }
 
+// A horizontal bar that mimics a line of text. widthFraction < 1 lets callers
+// create the ragged right-edge that real text has (e.g., 0.82f for a title line,
+// 0.45f for a short metadata line below it).
 @Composable
 fun SkeletonTextLine(
     modifier: Modifier = Modifier,
@@ -48,6 +63,9 @@ fun SkeletonTextLine(
     )
 }
 
+// A square box representing a thumbnail or artwork image. showSpinner adds a
+// centred CircularProgressIndicator for cases where the image is actively loading
+// (e.g., the EpisodeCardSkeleton in EpisodeCard.kt).
 @Composable
 fun SkeletonImageBox(
     modifier: Modifier = Modifier,
@@ -73,6 +91,9 @@ fun SkeletonImageBox(
     }
 }
 
+// A single list-item skeleton: 48dp image box + two text lines (title + subtitle).
+// showTrailingSpinner adds a small spinner on the right for lists that are actively
+// fetching additional pages. Used in DashboardScreen, FeedListScreen, etc.
 @Composable
 fun SkeletonListRow(
     modifier: Modifier = Modifier,
@@ -102,6 +123,9 @@ fun SkeletonListRow(
     }
 }
 
+// A grid-cell skeleton: square 1:1 aspect-ratio image block (podcast artwork)
+// with two text-line stubs below it. Used in FeedListScreen's adaptive grid
+// while feeds are loading from the server.
 @Composable
 fun SkeletonArtworkCard(
     modifier: Modifier = Modifier

@@ -1,5 +1,11 @@
 package com.castcharm.android.ui.shared_components
 
+// OfflineModePanel is the standard "server unreachable / offline" placeholder shown
+// in place of each screen's normal content when the app cannot reach the server.
+// It supports an optional primary action button (e.g., "View Downloads") and an
+// optional "Try Reconnecting" button that delegates to ReconnectOutlinedButton so
+// the reconnect-in-flight spinner state is handled uniformly across all screens.
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +46,8 @@ fun OfflineModePanel(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
+            // Contextual icon — defaults to CloudOff but callers can pass a different
+            // icon (e.g., WifiOff for a connectivity-specific message).
             Icon(
                 imageVector = icon,
                 contentDescription = null,
@@ -48,6 +56,7 @@ fun OfflineModePanel(
 
             Spacer(Modifier.height(16.dp))
 
+            // Bold title (e.g., "Offline Mode" or "Server Unavailable").
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleLarge,
@@ -56,12 +65,16 @@ fun OfflineModePanel(
 
             Spacer(Modifier.height(8.dp))
 
+            // Secondary message with context-specific detail about what's unavailable
+            // and what the user can do (e.g., "You can still access downloaded episodes").
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            // Optional primary CTA shown only when the caller provides both a label and
+            // a handler — e.g., a "Go to Downloads" button on the Dashboard offline panel.
             if (primaryActionLabel != null && onPrimaryAction != null) {
                 Spacer(Modifier.height(20.dp))
                 Button(
@@ -72,6 +85,9 @@ fun OfflineModePanel(
                 }
             }
 
+            // Optional reconnect button rendered via ReconnectOutlinedButton so the
+            // spinner-while-in-flight behaviour is consistent with all other reconnect
+            // buttons in the app (top bar icon, dialog button, etc.).
             if (onRetryConnection != null) {
                 Spacer(Modifier.height(10.dp))
                 ReconnectOutlinedButton(

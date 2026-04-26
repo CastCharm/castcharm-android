@@ -1,5 +1,21 @@
 package com.castcharm.android.ui.dashboard
 
+// DashboardViewModel populates the home screen with multiple independent data sections:
+//   - Stats (total podcasts / feeds from the server)
+//   - Feed health (feeds with last_error set)
+//   - Continue Listening (in-progress episodes, live via Flow)
+//   - Newest Episodes (recently server-downloaded episodes)
+//   - Suggestion Buckets (bucketed by duration: < 15 min, 15–45 min, etc.)
+//   - Top Backlog (feeds sorted by unplayed count)
+//
+// Each section has its own loading flag so the UI can show skeletons for each
+// section independently while data arrives. sawAnyFailure tracks whether any
+// individual section failed so a single toast is shown at the end rather than
+// per-section errors.
+//
+// Offline mode: skip all network calls and populate sections from the local DB.
+// Continue Listening is still live via Flow even offline.
+
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -97,6 +113,8 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    // Returns the repository's Flow if online (same underlying query), or falls
+    // back to the DAO directly if offline or before the ApiClient is initialized.
     private fun continueListeningFlow() =
         episodeRepositoryOrNull()?.getContinueListening(5)
             ?: db.episodeDao().getContinueListening(5)

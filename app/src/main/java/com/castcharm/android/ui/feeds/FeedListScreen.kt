@@ -1,4 +1,15 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// FeedListScreen renders the Podcasts tab: a responsive grid of feed artwork cards.
+// Three display states:
+//   1. Offline: OfflineFeedsContent with a reconnect button and a link to Downloads.
+//   2. Loading (no cached data): a grid of 6 SkeletonArtworkCard placeholders.
+//   3. Loaded: LazyVerticalGrid of FeedCard items, keyed by feed ID for stable recomposition.
+//
+// FeedCard: shows the custom or default artwork (falling back to the server cover endpoint),
+// overlays an unplayed-count Badge in the top-right corner, and displays the feed title +
+// episode count below. Uses minLines=2 on the title so cards in a row are aligned.
+//
+// EmptyScreen: shown when the server has no feeds yet (fresh server setup).
 package com.castcharm.android.ui.feeds
 
 import androidx.compose.foundation.background

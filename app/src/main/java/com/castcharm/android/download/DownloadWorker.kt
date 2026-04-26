@@ -1,5 +1,25 @@
 package com.castcharm.android.download
 
+// DownloadWorker streams an episode audio file from the server to phone storage.
+// It is dispatched by DownloadScheduler.kickQueue() and runs on Dispatchers.IO.
+//
+// Ownership model: DownloadScheduler writes the worker's UUID into the download
+// row's work_request_id field before dispatch. DownloadWorker checks ownsRow()
+// at multiple checkpoints throughout doWork() — if the UUID doesn't match,
+// another worker was dispatched for the same episode (e.g., due to a retry),
+// and this worker exits immediately to avoid a double-write race.
+//
+// Completion is atomic: local_path + local_size_bytes are written and the
+// download row is deleted in a single withTransaction block so there is no
+// window where the episode looks "downloaded" but the row still exists (or
+// vice versa).
+//
+// Error handling:
+//   - InterruptedException (isStopped / coroutine cancellation): discards partial
+//     file, resets progress to 0, re-queues with preserveProgress=false.
+//   - All other exceptions: deletes partial file, preserves progress pct so the
+//     UI shows how far the download got before failing, re-queues for retry.
+
 import android.content.Context
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.room.withTransaction
@@ -26,9 +46,12 @@ class DownloadWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        // episode_id is the only input parameter. -1 is the WorkManager default
+        // for a missing int key, so treat it as a permanent failure.
         val episodeId = inputData.getInt("episode_id", -1)
         if (episodeId == -1) return@withContext Result.failure()
 
+        // Capture this worker's UUID as a string for all subsequent ownsRow() checks.
         val myWorkId = id.toString()
 
         val db = AppDatabase.getDatabase(applicationContext)
@@ -36,14 +59,24 @@ class DownloadWorker(
         val downloadDao = db.downloadDao()
         val scheduler = DownloadScheduler(applicationContext)
 
+        // Tracks the file being written to disk so it can be deleted on failure.
+        // Set to null once the download completes successfully (atomic transaction).
         var partialFile: File? = null
         var completedSuccessfully = false
 
+        // Ownership check: verifies that this worker's UUID still matches what
+        // DownloadScheduler recorded in the download row. Returns false if the
+        // row was deleted (episode cancelled) or reassigned (another dispatch
+        // superseded this one), signalling the worker should abort.
         suspend fun ownsRow(): Boolean {
             val row = downloadDao.getDownload(episodeId) ?: return false
             return row.work_request_id == myWorkId
         }
 
+        // Shared cleanup helper called from both catch blocks. Only acts if this
+        // worker still owns the row (prevents double-cleanup with a concurrent worker).
+        // Clears the work_request_id so DownloadScheduler can re-dispatch,
+        // optionally deletes the partial file, and optionally preserves progress.
         suspend fun requeueOwnedDownload(
             preserveProgress: Boolean,
             deletePartial: Boolean
@@ -58,6 +91,8 @@ class DownloadWorker(
 
             val current = episodeDao.getEpisodeOnce(episodeId)
             db.withTransaction {
+                // Clear the work_request_id so kickQueue() treats this row as
+                // unassigned and will dispatch a fresh worker on its next cycle.
                 downloadDao.updateWorkRequestId(episodeId, null)
 
                 if (current != null && current.local_path == null) {
@@ -74,17 +109,27 @@ class DownloadWorker(
                 }
             }
 
+            // Kick the queue so the freed concurrency slot can be filled by
+            // the next waiting episode.
             runCatching { scheduler.kickQueue() }
         }
 
         try {
+            // Permanent failure if the episode row doesn't exist (shouldn't happen,
+            // but guards against a race where the row was deleted before we started).
             val episode = episodeDao.getEpisodeOnce(episodeId) ?: return@withContext Result.failure()
 
+            // Ownership check: if our UUID doesn't match the row, another worker
+            // was dispatched for this episode (e.g., from a race in kickQueue()).
+            // Exit immediately so only one worker writes the file.
             val row = downloadDao.getDownload(episodeId)
             if (row == null || row.work_request_id != myWorkId) {
                 return@withContext Result.failure()
             }
 
+            // Read the server base URL from DataStore. This is needed to build
+            // the streaming URL; if it's missing, the server was never configured
+            // on this device — re-queue so we can retry after setup completes.
             val serverUrlKey = stringPreferencesKey("server_url")
             val savedUrl = applicationContext.dataStore.data.map { it[serverUrlKey] }.first()
             if (savedUrl.isNullOrBlank()) {
@@ -97,6 +142,10 @@ class DownloadWorker(
 
             val baseUrl = if (savedUrl.endsWith("/")) savedUrl else "$savedUrl/"
 
+            // Storage quota check. enforceQuota() deletes oldest played episodes
+            // to free space. If there's still not enough room after enforcement,
+            // mark the episode failed and remove its download row — it needs manual
+            // intervention (user clears storage or raises the quota).
             val storageManager = StorageManager(applicationContext)
             val estimatedSize = episode.enclosure_length ?: 0L
             if (!storageManager.canDownload(estimatedSize)) {
@@ -113,12 +162,19 @@ class DownloadWorker(
                 }
             }
 
+            // Build a filesystem-safe filename from the episode title: strip
+            // special characters, trim whitespace, cap at 100 chars, and fall back
+            // to "episode_<id>" if the result is blank.
             val safeTitle = episode.title
                 .replace("""[^\w\s.-]""".toRegex(), "")
                 .trim()
                 .take(100)
                 .ifBlank { "episode_$episodeId" }
 
+            // Determine the file extension. Priority order:
+            //   1. MIME type from the enclosure (most reliable)
+            //   2. File extension from the enclosure URL
+            //   3. Default to mp3 as the most common podcast format
             val extension = when {
                 episode.enclosure_type?.contains("mp3") == true -> "mp3"
                 episode.enclosure_type?.contains("mp4") == true ||
@@ -130,11 +186,17 @@ class DownloadWorker(
                 else -> "mp3"
             }
 
+            // getDownloadPath() prefixes the filename with episodeId_ to guarantee
+            // uniqueness even when two episodes have the same title.
             val downloadFile = storageManager.getDownloadPath(episodeId, "$safeTitle.$extension")
+            // Track the partial file so it can be deleted if we fail mid-stream.
             partialFile = downloadFile
 
+            // Final ownership check before we start writing — avoids beginning
+            // a potentially large download if we've already been superseded.
             if (!ownsRow()) return@withContext Result.failure()
 
+            // Transition status to "downloading" so the UI shows the active spinner.
             episodeDao.update(
                 episode.copy(
                     status = "downloading",
@@ -143,6 +205,8 @@ class DownloadWorker(
             )
             downloadDao.updateProgressPct(episodeId, 0)
 
+            // Report initial progress to any WorkManager observers (e.g., the
+            // DownloadsViewModel watching for live progress updates).
             setProgress(
                 workDataOf(
                     "status" to "starting",
@@ -153,6 +217,11 @@ class DownloadWorker(
                 )
             )
 
+            // Build a dedicated OkHttpClient for the streaming download.
+            // PersistentCookieJar attaches the session cookie so the server
+            // authenticates the request. readTimeout(0) disables the read
+            // deadline — without this, a large file or slow connection would
+            // time out mid-stream after the default 10s idle window.
             val client = OkHttpClient.Builder()
                 .cookieJar(PersistentCookieJar(applicationContext))
                 .connectTimeout(30, TimeUnit.SECONDS)
@@ -165,6 +234,9 @@ class DownloadWorker(
                     .build()
             ).execute()
 
+            // Non-2xx response: re-queue for retry (server error, auth failure,
+            // episode not available, etc.). Preserve progress so the user can
+            // see how far we got on the previous attempt.
             if (!response.isSuccessful) {
                 requeueOwnedDownload(
                     preserveProgress = true,
@@ -181,6 +253,10 @@ class DownloadWorker(
                 return@withContext Result.failure()
             }
 
+            // Determine total size for progress calculation. Priority:
+            //   1. Content-Length from the HTTP response (most accurate)
+            //   2. enclosure_length from the RSS feed (known from metadata sync)
+            //   3. -1 if unknown (progress will always show 0%)
             val reportedTotalBytes = body.contentLength()
             val effectiveTotalBytes = when {
                 reportedTotalBytes > 0L -> reportedTotalBytes
@@ -192,25 +268,31 @@ class DownloadWorker(
             var lastUiUpdateAt = 0L
             var lastReportedPct = -1
 
+            // Streaming copy loop. 64 KB buffer balances memory use and I/O calls.
             body.byteStream().use { input ->
                 downloadFile.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
                     var bytesCopied = 0L
 
                     while (true) {
+                        // ensureActive() throws CancellationException if the coroutine
+                        // was cancelled (e.g., app killed by system). isStopped is the
+                        // WorkManager signal — both result in an InterruptedException
+                        // caught below to trigger cleanup.
                         ensureActive()
                         if (isStopped) {
                             throw InterruptedException("Download stopped")
                         }
 
                         val bytesRead = input.read(buffer)
-                        if (bytesRead == -1) break
+                        if (bytesRead == -1) break  // End of stream — download complete.
 
                         output.write(buffer, 0, bytesRead)
                         bytesCopied += bytesRead
 
                         val now = System.currentTimeMillis()
                         val elapsedMs = max(1L, now - startedAt)
+                        // Instantaneous speed averaged over total elapsed time.
                         val speedBps = bytesCopied * 1000L / elapsedMs
                         val pct = if (effectiveTotalBytes > 0L) {
                             ((bytesCopied * 100L) / effectiveTotalBytes).toInt().coerceIn(0, 100)
@@ -218,11 +300,17 @@ class DownloadWorker(
                             0
                         }
 
+                        // Throttle DB and WorkManager progress writes: update when
+                        // at least 1 percentage point has changed OR at least 1 second
+                        // has passed — whichever comes first. This avoids hammering the
+                        // DB on every 64 KB buffer fill for large files.
                         val shouldReport =
                             pct >= lastReportedPct + 1 ||
                                     now - lastUiUpdateAt >= 1000L
 
                         if (shouldReport) {
+                            // Ownership check inside the loop. If we lost ownership
+                            // (row deleted or reassigned), abort the stream immediately.
                             if (!ownsRow()) {
                                 throw InterruptedException("Ownership lost")
                             }
@@ -249,8 +337,13 @@ class DownloadWorker(
                 }
             }
 
+            // Final ownership check after the stream closes but before committing.
             if (!ownsRow()) return@withContext Result.failure()
 
+            // Atomic completion: write local_path + size and delete the download
+            // row in a single transaction. This prevents any window where the
+            // episode shows as "downloaded" but the queue row still exists (or
+            // vice versa), which would confuse kickQueue() on the next cycle.
             db.withTransaction {
                 episodeDao.updateDownloadComplete(
                     episodeId = episodeId,
@@ -261,6 +354,8 @@ class DownloadWorker(
             }
 
             completedSuccessfully = true
+            // Clear partialFile so the catch blocks don't attempt to delete
+            // the fully-written file if an exception somehow fires after this.
             partialFile = null
 
             setProgress(
@@ -273,9 +368,13 @@ class DownloadWorker(
                 )
             )
 
+            // Trigger the queue so the freed concurrency slot fills immediately.
             runCatching { scheduler.kickQueue() }
             Result.success()
         } catch (e: InterruptedException) {
+            // Intentional stop: WorkManager signalled isStopped, or we detected
+            // ownership loss. Don't preserve progress — the download will restart
+            // cleanly from 0 on the next attempt.
             if (!completedSuccessfully) {
                 requeueOwnedDownload(
                     preserveProgress = false,
@@ -285,6 +384,9 @@ class DownloadWorker(
 
             if (completedSuccessfully) Result.success() else Result.failure()
         } catch (e: Exception) {
+            // Unexpected error (network blip, disk full, etc.). Preserve the
+            // progress percentage so the UI can show how far the download got
+            // before failing.
             e.printStackTrace()
 
             if (!completedSuccessfully) {

@@ -1,5 +1,15 @@
 package com.castcharm.android.ui.episodes
 
+// EpisodeListViewModel drives the episode list for a single feed. It:
+//   - Combines the episodes Flow and the downloads Flow so the UI sees live
+//     download-in-progress indicators without separate refresh calls.
+//   - Uses a "hasMore" flag (from the server's limit+1 trick) to show a
+//     "Load More" button at the bottom of the list.
+//   - Supports multi-select mode: selectedEpisodes is the selected set; the
+//     UI switches to multi-select mode when any episode is selected.
+//   - Detects when a feed is deleted server-side (feed disappears mid-refresh)
+//     and surfaces an error rather than showing a stale empty list.
+
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -65,6 +75,12 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
     private fun loadFeedAndEpisodes() {
         viewModelScope.launch {
             Log.d("EpisodeListViewModel", "Starting collection for feed $feedId")
+            // Combine the episodes list with the downloads table so that any
+            // phone-side download activity (new row added, progress updated, row
+            // deleted) causes the UI to recompose without an explicit refresh.
+            // activePhoneDownloadEpisodeIds is the subset of this feed's episodes
+            // that currently have a DownloadEntity row — used by EpisodeCard to
+            // show the in-progress indicator.
             combine(
                 db.episodeDao().getEpisodesByFeed(feedId),
                 db.downloadDao().getAllDownloads()
@@ -195,6 +211,9 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         }
     }
 
+    // Triggered by the "Load More" button at the bottom of the episode list.
+    // Calculates the new limit as current episode count + 100, so each page
+    // load adds another 100 episodes to the local cache.
     fun loadMore() {
         if (_uiState.value.isRefreshing || !_uiState.value.hasMore || CastCharmApp.isOfflineMode) return
 
@@ -216,6 +235,8 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                     return@launch
                 }
 
+                // The new limit expands the window by 100 each time. The server
+                // returns limit+1 items if more exist, so hasMore stays true.
                 val newLimit = _uiState.value.episodes.size + 100
                 val hasMore = episodeRepositoryOrNull()?.refreshEpisodesByFeed(feedId, limit = newLimit) ?: false
                 _uiState.update {

@@ -1,5 +1,19 @@
 package com.castcharm.android.sync
 
+// SyncWorker flushes offline-accumulated changes (played status, playback progress)
+// from the local DB to the server. It runs in two scenarios:
+//   - Periodically (every hour) via the PeriodicWorkRequest scheduled in MainActivity.
+//   - Immediately after login or reconnect via the OneTimeWorkRequest enqueued by
+//     AppSessionManager.enqueueImmediateSync().
+//
+// If any episode sync fails, the worker returns Result.retry() so WorkManager
+// schedules another attempt with exponential backoff. Successfully synced episodes
+// have their sync_pending_* flags cleared so they are not re-sent on the next run.
+//
+// The ApiClient lazy-initialization at the top of doWork() handles the case where
+// WorkManager runs the worker after a device restart before the app process has
+// started — the ApiClient would not yet be initialized from the normal flow.
+
 import android.content.Context
 import android.util.Log
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -19,6 +33,9 @@ class SyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        // Don't try to sync while explicitly in offline mode — the user chose to
+        // work offline and we should not break that expectation. Return retry() so
+        // WorkManager will try again the next time it fires.
         if (CastCharmApp.isOfflineMode) {
             Log.d("SyncWorker", "Skipping sync because offline mode is active")
             return@withContext Result.retry()
@@ -27,6 +44,9 @@ class SyncWorker(
         val db = AppDatabase.getDatabase(applicationContext)
         val dao = db.episodeDao()
 
+        // Lazy ApiClient initialization: if the app process restarted (e.g., after
+        // a device reboot) the ApiClient may not yet be initialized. Read the saved
+        // server URL from DataStore and initialize it before proceeding.
         try {
             if (!CastCharmApp.apiClient.isInitialized) {
                 val savedUrl = applicationContext.dataStore.data
@@ -51,6 +71,7 @@ class SyncWorker(
             return@withContext Result.retry()
         }
 
+        // Fetch all episodes with pending sync flags set.
         val pending = dao.getPendingSyncEpisodes()
         if (pending.isEmpty()) {
             Log.d("SyncWorker", "No pending episode sync work")
@@ -61,8 +82,12 @@ class SyncWorker(
 
         var allSuccessful = true
 
+        // Process each pending episode independently so a single failure does not
+        // prevent other episodes from being synced.
         pending.forEach { episode ->
             try {
+                // Flush played status first (so progress doesn't mark it unplayed
+                // if the episode was toggled played while offline).
                 if (episode.sync_pending_played) {
                     api.togglePlayed(episode.id)
                     dao.updatePlayedStatus(
@@ -91,6 +116,8 @@ class SyncWorker(
             }
         }
 
+        // Return retry() if any episode failed — WorkManager will retry the whole
+        // worker (only the episodes still flagged sync_pending_* will be re-sent).
         if (allSuccessful) Result.success() else Result.retry()
     }
 }

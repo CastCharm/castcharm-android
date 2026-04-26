@@ -1,4 +1,17 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// DownloadsScreen renders the Downloads tab with a two-level navigation:
+//   Level 1 (feed list): a sidebar/list of feeds that have downloaded episodes,
+//     each showing a download count badge. Tapping a feed navigates to Level 2.
+//   Level 2 (feed detail): shows that feed's downloaded episodes, phone-side
+//     in-progress downloads (with live progress bars), and server-side in-progress
+//     downloads (queued/downloading on the server).
+//
+// The "Phone Downloads" and "Saving to Server" sections each show progress rows
+// with status text, a percentage bar, and a speed indicator. The cancel button
+// only appears for cancellable states (ENQUEUED or RUNNING on phone side).
+//
+// Multi-select: long-pressing an episode in Level 2 enters selection mode.
+// Selected episodes can be deleted in bulk.
 package com.castcharm.android.ui.downloads
 
 import androidx.compose.foundation.background

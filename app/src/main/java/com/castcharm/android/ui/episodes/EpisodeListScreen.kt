@@ -1,4 +1,17 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
+// EpisodeListScreen shows the episodes for a single feed. It uses EpisodeCard
+// from shared_components for each row, which handles play/download/played actions
+// and the expandable description block.
+//
+// Two top-bar modes:
+//   1. Normal: feed title + art, refresh icon, reconnect icon (if offline).
+//   2. Selection: episode count badge, Select All, and download-selected button.
+//
+// "Load More" button appears at the bottom of the list when hasMore=true
+// (server has more episodes beyond the current local cache limit).
+//
+// Offline mode: hides server-download actions, shows OfflineModePanel if the
+// feed has no cached episodes at all.
 
 package com.castcharm.android.ui.episodes
 

@@ -1,5 +1,35 @@
 package com.castcharm.android.player
 
+// PlayerService is a MediaLibraryService that hosts ExoPlayer and the Media3
+// MediaLibrarySession. It runs in the app's process but outlives individual
+// Activities, keeping audio playback alive in the background.
+//
+// Architecture:
+//   - PlayerService: the Service itself. Owns ExoPlayer, the MediaLibrarySession,
+//     and the progress-tracking coroutine. Handles playback lifecycle and Android Auto
+//     library change notifications.
+//   - PlayerLibrarySessionCallback: nested class implementing the MediaLibrarySession
+//     callback interface. Handles browse tree requests from Android Auto and resolves
+//     episode MediaItems to their actual URIs before ExoPlayer sees them.
+//
+// Android Auto integration:
+//   The browse tree is organized as:
+//     root → [Continue, Recent, Podcasts, Downloads]
+//     Podcasts → feed_<id> → episode_<id>
+//   Offline mode collapses the tree to only the Downloads section.
+//   A polling loop (startLibraryRefreshObserver) detects DB changes and notifies
+//   Android Auto via notifyChildrenChanged() so the UI stays fresh.
+//
+// Progress tracking:
+//   startProgressTracking() runs a 1-second loop that syncs playback position to DB
+//   and the server. All write operations follow the same write-local-then-sync pattern
+//   as EpisodeRepository — if the server call fails, pending=true is set for SyncWorker.
+//
+// Artwork:
+//   All artwork URIs exposed to Android Auto use content:// scheme via PodcastArtworkProvider.
+//   Direct http:// URLs cannot be used because Android Auto runs in a separate process
+//   with no access to the app's authenticated OkHttpClient.
+
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -28,10 +58,10 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
+import com.castcharm.android.AppAuthState
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.MainActivity
 import com.castcharm.android.R
-import com.castcharm.android.data.api.PersistentCookieJar
 import com.castcharm.android.data.api.models.ProgressRequest
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
@@ -61,30 +91,51 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+// Log tag shared by both PlayerService and PlayerLibrarySessionCallback.
 private const val TAG = "CastCharm"
+
+// Browse tree node IDs used in the Android Auto MediaLibrarySession.
+// These string constants must match what Android Auto sends back in parentId
+// parameters to onGetChildren().
 private const val ROOT_ID = "root"
 private const val SECTION_CONTINUE = "section_continue"
 private const val SECTION_RECENT = "section_recent"
 private const val SECTION_PODCASTS = "section_podcasts"
 private const val SECTION_DOWNLOADS = "section_downloads"
+// Suffix appended to packageName to form the authority of PodcastArtworkProvider.
+// Must match the authority declared in AndroidManifest.xml.
 private const val ARTWORK_AUTHORITY_SUFFIX = ".artwork"
 
 
+// Mutex prevents a race where multiple coroutines call ensureApiClientInitialized
+// simultaneously on startup (service init + browser connect + progress job all
+// start at roughly the same time). Only one winner initializes; others wait.
 private val apiClientInitMutex = Mutex()
 
 private fun normalizeBaseUrl(url: String): String =
     if (url.endsWith("/")) url else "$url/"
 
+// Lazy ApiClient initialization used by PlayerService so it can function
+// after a device restart when WorkManager or the system brings the service
+// up before the app process has gone through normal startup. Reads the saved
+// server URL from DataStore and initializes ApiClient if it isn't already.
+// Returns the base URL string (empty if no URL is saved or init fails).
 private suspend fun ensureApiClientInitializedFromStorage(context: Context): String {
     if (CastCharmApp.apiClient.isInitialized) {
         return CastCharmApp.apiClient.getBaseUrl()
     }
 
     return apiClientInitMutex.withLock {
+        // Double-checked locking: another coroutine may have initialized it
+        // while we waited for the lock.
         if (CastCharmApp.apiClient.isInitialized) {
             return@withLock CastCharmApp.apiClient.getBaseUrl()
         }
@@ -108,12 +159,17 @@ private suspend fun ensureApiClientInitializedFromStorage(context: Context): Str
     }
 }
 
+// Blocking wrapper used from OkHttp interceptor context (called on a binder
+// thread where suspend functions cannot be used).
 private fun ensureApiClientInitializedBlocking(context: Context): String = runBlocking(Dispatchers.IO) {
     ensureApiClientInitializedFromStorage(context)
 }
 
+// Custom SessionCommand sent from the speed button in the notification / Android Auto.
+// The handler in onCustomCommand() cycles through SPEEDS.
 private val SPEED_COMMAND = SessionCommand("com.castcharm.android.CYCLE_SPEED", Bundle.EMPTY)
 private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+// Episodes are marked played when position reaches 98% of duration.
 private const val PLAYED_THRESHOLD_PCT = 0.98f
 
 private fun speedLabel(speed: Float) = when (speed) {
@@ -125,11 +181,16 @@ private fun speedLabel(speed: Float) = when (speed) {
     else -> "%.2f×".format(speed)
 }
 
+// Builds the now-playing subtitle shown in the notification and Android Auto.
+// Format: "Feed Title • 1.5×" (or just "1.5×" if no feed title is available).
 private fun buildNowPlayingSubtitle(feedTitle: String?, speed: Float): String {
     val label = speedLabel(speed)
     return if (feedTitle.isNullOrBlank()) label else "$feedTitle • $label"
 }
 
+// Extracts the raw feed title from MediaMetadata, stripping the speed label
+// suffix that buildNowPlayingSubtitle() appends. Used when refreshing metadata
+// after a speed change so we don't double-append the label.
 private fun extractBaseFeedTitle(metadata: MediaMetadata): String {
     val extras = metadata.extras
     val fromExtras = extras?.getString("castcharm_feed_title")
@@ -140,12 +201,15 @@ private fun extractBaseFeedTitle(metadata: MediaMetadata): String {
 
     val subtitle = metadata.subtitle?.toString()
     if (!subtitle.isNullOrBlank()) {
+        // Strip the " • 1.5×" suffix that was previously appended.
         return subtitle.substringBefore(" • ").ifBlank { subtitle }
     }
 
     return ""
 }
 
+// Sections visible in Android Auto's browse tree depend on connectivity mode.
+// Offline mode shows only Downloads since network-dependent sections would be empty.
 private fun visibleRootSections(isOffline: Boolean): List<String> {
     return if (isOffline) {
         listOf(SECTION_DOWNLOADS)
@@ -159,6 +223,9 @@ private fun visibleRootSections(isOffline: Boolean): List<String> {
     }
 }
 
+// Returns true if the given Android Auto section parentId should be hidden
+// while in offline mode. Used by onGetChildren() to return an empty list
+// rather than attempting network queries.
 private fun isOfflineHiddenSection(parentId: String): Boolean {
     if (!CastCharmApp.isOfflineMode) return false
     return parentId == SECTION_CONTINUE ||
@@ -167,6 +234,8 @@ private fun isOfflineHiddenSection(parentId: String): Boolean {
             parentId.startsWith("feed_")
 }
 
+// Speed cycle button shown in the notification shade and Android Auto overflow.
+// SLOT_OVERFLOW places it in the "more actions" menu rather than primary controls.
 @OptIn(UnstableApi::class)
 private fun createSpeedButton(speed: Float): CommandButton =
     CommandButton.Builder(CommandButton.ICON_UNDEFINED)
@@ -176,6 +245,9 @@ private fun createSpeedButton(speed: Float): CommandButton =
         .setSlots(CommandButton.SLOT_OVERFLOW)
         .build()
 
+// SLOT_BACK and SLOT_FORWARD map to the standard skip-back / skip-forward positions
+// in the media notification and Android Auto player bar. 30-second increments are
+// the podcast industry standard.
 @OptIn(UnstableApi::class)
 private fun createSeekBackButton(): CommandButton =
     CommandButton.Builder(CommandButton.ICON_SKIP_BACK_30)
@@ -192,6 +264,9 @@ private fun createSeekForwardButton(): CommandButton =
         .setSlots(CommandButton.SLOT_FORWARD)
         .build()
 
+// Returns the three media buttons shown at session start. Called from both
+// PlayerService.onCreate() and PlayerLibrarySessionCallback.onConnect() so
+// the current speed label is reflected immediately when a new controller connects.
 private fun initialMediaButtonPreferences(speed: Float): ImmutableList<CommandButton> {
     return ImmutableList.of(
         createSpeedButton(speed),
@@ -200,6 +275,9 @@ private fun initialMediaButtonPreferences(speed: Float): ImmutableList<CommandBu
     )
 }
 
+// Snapshot of Android Auto browse counts used by startLibraryRefreshObserver()
+// to detect when the DB has changed and notifyChildrenChanged() should be called.
+// Comparing snapshots avoids spamming Android Auto with unnecessary notifications.
 private data class BrowseSnapshot(
     val isOffline: Boolean,
     val rootCount: Int,
@@ -226,26 +304,64 @@ class PlayerService : MediaLibraryService() {
         super.onCreate()
         Log.d(TAG, "PlayerService.onCreate start")
         try {
+            // Kick off lazy ApiClient init in the background so it's ready before
+            // the first playback request or browse query arrives.
             serviceScope.launch {
                 ensureApiClientInitializedFromStorage(this@PlayerService)
             }
 
-            val cookieJar = PersistentCookieJar(this)
+            // Build a dedicated OkHttpClient for streaming. The interceptor calls
+            // ensureApiClientInitializedBlocking() to handle the post-reboot case
+            // where the service starts before the ApiClient is initialized.
+            // readTimeout(0) disables the read deadline — required for streaming
+            // large audio files without a mid-stream timeout.
+            //
+            // We delegate cookie reads to ApiClient's live cookie jar rather than
+            // using a separate PersistentCookieJar. A separate jar would only load
+            // cookies from disk once at service creation time, so it would be stale
+            // if login happened after the service started — causing 401 errors when
+            // streaming. The application interceptor below guarantees ApiClient is
+            // initialized before OkHttp's BridgeInterceptor calls loadForRequest().
+            val streamingCookieJar = object : CookieJar {
+                override fun loadForRequest(url: HttpUrl): List<Cookie> =
+                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.loadForRequest(url) ?: emptyList()
+
+                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.saveFromResponse(url, cookies)
+                }
+            }
             val streamingClient = OkHttpClient.Builder()
-                .cookieJar(cookieJar)
+                .cookieJar(streamingCookieJar)
                 .addInterceptor { chain ->
                     ensureApiClientInitializedBlocking(this@PlayerService)
-                    chain.proceed(chain.request())
+                    // Fail loudly if init failed — better than proceeding without auth
+                    // and getting a mysterious 401 that ExoPlayer surfaces as a generic error.
+                    if (!CastCharmApp.apiClient.isInitialized) {
+                        throw IOException("Cannot stream: server connection unavailable")
+                    }
+                    val response = chain.proceed(chain.request())
+                    if (response.code == 401 || response.code == 403) {
+                        // Mirror SessionStateInterceptor: drive the auth state machine
+                        // so the UI transitions to the login screen on session expiry,
+                        // just as it does for regular API calls.
+                        CastCharmApp.reportAuthInvalid()
+                    }
+                    response
                 }
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
                 .build()
 
+            // Wrap the OkHttpClient in a Media3 data source factory so ExoPlayer
+            // uses our authenticated client for all network media requests.
             val dataSourceFactory = DefaultDataSource.Factory(
                 this,
                 OkHttpDataSource.Factory(streamingClient).setUserAgent("CastCharm/1.0")
             )
 
+            // AUDIO_CONTENT_TYPE_SPEECH activates Android's audio routing for podcasts
+            // (e.g., Bluetooth SCO vs. A2DP profile selection).
+            // handleAudioBecomingNoisy=true pauses playback when headphones are unplugged.
             player = ExoPlayer.Builder(this)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
                 .setAudioAttributes(
@@ -274,10 +390,13 @@ class PlayerService : MediaLibraryService() {
             callback.updateLatestPlaybackSpeed(latestPlaybackSpeed)
 
             player.addListener(object : Player.Listener {
+                // Start/stop the 1-second progress sync loop in sync with play/pause.
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     if (isPlaying) startProgressTracking() else stopProgressTracking()
                 }
 
+                // When the episode finishes naturally, mark it played immediately
+                // rather than waiting for the next progress sync cycle.
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
                         val episodeId = currentEpisodeId()
@@ -285,6 +404,8 @@ class PlayerService : MediaLibraryService() {
                     }
                 }
 
+                // Speed changes need to be reflected in the now-playing metadata subtitle
+                // and the speed button label. Both are updated here synchronously.
                 override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
                     latestPlaybackSpeed = playbackParameters.speed
                     callback.updateLatestPlaybackSpeed(playbackParameters.speed)
@@ -295,6 +416,8 @@ class PlayerService : MediaLibraryService() {
                 }
             })
 
+            // Tapping the notification opens MainActivity rather than a specific
+            // episode screen — the player state is available via the global PlayerController.
             val pendingIntent = PendingIntent.getActivity(
                 this,
                 0,
@@ -308,11 +431,14 @@ class PlayerService : MediaLibraryService() {
                 .build()
             Log.d(TAG, "MediaLibrarySession built OK, session=$mediaSession")
 
+            // Notify Android Auto of the initial library state on startup.
             serviceScope.launch {
                 callback.notifyLibraryChanged()
                 notifyBrowseSectionsChanged()
             }
 
+            // Re-notify whenever the connectivity mode changes (online ↔ offline)
+            // so Android Auto's browse tree updates to show/hide network sections.
             connectivityModeJob = serviceScope.launch {
                 CastCharmApp.connectivityMode.collectLatest { mode ->
                     Log.d(TAG, "AA connectivity mode changed: $mode")
@@ -321,12 +447,36 @@ class PlayerService : MediaLibraryService() {
                 }
             }
 
+            // Stop playback and cancel in-flight progress syncs whenever the session
+            // is invalidated (logout, session expiry, or server-side auth rejection).
+            // Without this, the progress loop keeps firing API calls with a dead session
+            // and the player stays running even though the user has been logged out.
+            serviceScope.launch {
+                CastCharmApp.authState.collect { state ->
+                    if (state is AppAuthState.NotLoggedIn) {
+                        stopProgressTracking()
+                        withContext(Dispatchers.Main) {
+                            if (::player.isInitialized) {
+                                player.stop()
+                                player.clearMediaItems()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Start the polling loop that detects DB content changes and pushes
+            // notifyChildrenChanged() updates to Android Auto.
             startLibraryRefreshObserver()
         } catch (e: Exception) {
             Log.e(TAG, "PlayerService.onCreate FAILED — session will be null", e)
         }
     }
 
+    // Polls the DB every 1.5 seconds to detect content changes (new episodes
+    // downloaded, feed updated, played state changed) and pushes notifyChildrenChanged()
+    // to Android Auto. The snapshot comparison prevents unnecessary notifications
+    // when nothing has changed — Android Auto rate-limits requests from the system.
     private fun startLibraryRefreshObserver() {
         libraryRefreshJob?.cancel()
         libraryRefreshJob = serviceScope.launch {
@@ -367,6 +517,11 @@ class PlayerService : MediaLibraryService() {
         )
     }
 
+    // Updates the subtitle field of the current MediaItem to reflect the new
+    // playback speed. This is what Android Auto and Bluetooth headsets display
+    // as the now-playing subtitle (e.g., "Feed Name • 1.5×").
+    // Must run on Main thread because player.replaceMediaItem() is not thread-safe.
+    // Early-exits if the subtitle is already correct to avoid unnecessary updates.
     private suspend fun refreshNowPlayingSpeedMetadata(speed: Float) {
         withContext(Dispatchers.Main) {
             if (!::player.isInitialized) return@withContext
@@ -379,6 +534,7 @@ class PlayerService : MediaLibraryService() {
             val baseFeedTitle = extractBaseFeedTitle(currentMetadata)
             val desiredSubtitle = buildNowPlayingSubtitle(baseFeedTitle, speed)
 
+            // No-op guard: avoid replacing the MediaItem if the subtitle is already correct.
             if (currentMetadata.subtitle?.toString() == desiredSubtitle) {
                 return@withContext
             }
@@ -398,16 +554,29 @@ class PlayerService : MediaLibraryService() {
                 .setMediaMetadata(updatedMetadata)
                 .build()
 
+            // replaceMediaItem() swaps the metadata in-place without interrupting
+            // playback (unlike setMediaItem() which resets player state).
             player.replaceMediaItem(currentIndex, updatedItem)
         }
     }
 
+    // Runs while the player is actively playing. Ticks every 1 second but only
+    // syncs to the server every 10 seconds (lastSyncMs gate) to avoid hammering
+    // the API with progress updates on every tick.
+    //
+    // Write pattern mirrors EpisodeRepository.updateProgress():
+    //   - Online: write DB (pending=false) + call API; if API fails, write DB (pending=true)
+    //   - Offline: write DB (pending=true) only; SyncWorker flushes later
+    //
+    // Also checks the played threshold on each sync cycle so auto-mark-played
+    // works even if the user pauses right at 98% and never hits STATE_ENDED.
     private fun startProgressTracking() {
         progressJob?.cancel()
         progressJob = serviceScope.launch {
             var lastSyncMs = 0L
             while (isActive) {
                 delay(1000)
+                // Player state must be read on Main thread.
                 val (episodeId, positionMs, durationMs) = withContext(Dispatchers.Main) {
                     Triple(currentEpisodeId(), player.currentPosition, player.duration)
                 }
@@ -417,16 +586,21 @@ class PlayerService : MediaLibraryService() {
                 val durationSeconds = durationMs.takeIf { it > 0L }?.div(1000L)?.toInt()
                 val now = System.currentTimeMillis()
 
+                // 10-second server sync gate — save battery and server load.
                 if (now - lastSyncMs >= 10_000L) {
                     try {
                         val existing = db.episodeDao().getEpisodeOnce(episodeId)
                         val targetPlayed = EpisodeRepository.derivePlayedState(
                             positionSeconds = positionSeconds,
+                            // durationSeconds from the live player is more accurate than
+                            // the cached DB value (which may be from RSS metadata).
                             durationSeconds = durationSeconds ?: existing?.duration,
                             currentPlayed = existing?.played ?: false,
                             thresholdPct = PLAYED_THRESHOLD_PCT
                         )
 
+                        // Write progress to DB. pending flag is true only if we can't
+                        // reach the server right now; SyncWorker will flush it later.
                         db.episodeDao().updateProgress(
                             episodeId,
                             positionSeconds,
@@ -439,6 +613,7 @@ class PlayerService : MediaLibraryService() {
                                 .updateProgress(episodeId, ProgressRequest(positionSeconds))
                         }
 
+                        // Auto-mark played if the threshold was crossed mid-playback.
                         if (existing != null && existing.played != targetPlayed) {
                             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
                                 CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
@@ -449,8 +624,12 @@ class PlayerService : MediaLibraryService() {
                         }
 
                         lastSyncMs = now
+                        // Notify Android Auto so the "Continue Listening" list updates
+                        // to reflect the new position/played state.
                         notifyBrowseSectionsChanged(episodeId)
                     } catch (_: Exception) {
+                        // Server call failed — write to DB with pending=true so
+                        // SyncWorker can flush the progress on the next cycle.
                         val existing = db.episodeDao().getEpisodeOnce(episodeId)
                         val targetPlayed = EpisodeRepository.derivePlayedState(
                             positionSeconds = positionSeconds,

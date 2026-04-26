@@ -1,5 +1,21 @@
 package com.castcharm.android.ui.player
 
+// PlayerViewModel bridges PlayerScreen and the global PlayerController.
+// It observes PlayerController.playbackState (which ticks every 500ms) and
+// enriches it with the full EpisodeEntity + FeedEntity from the DB for display.
+//
+// Key responsibilities:
+//   - Keeps currentlyLoadedEpisodeId to detect episode transitions and
+//     trigger a fresh DB load only when the playing episode changes.
+//   - reconcilePlayedForUi(): adjusts episode.played locally so the scrubber
+//     color and "mark played" button update immediately when the threshold is
+//     crossed, without waiting for the DB write to round-trip.
+//   - progressTrackingJob: 10-second sync loop matching PlayerService's logic
+//     (PlayerService handles the actual server syncing; this job is an extra
+//     safety net for when PlayerScreen is in the foreground).
+//   - Sleep timer: counts down in UI state only; pauses the player when it hits 0.
+//   - justMarkedPlayed: one-shot flag consumed by PlayerScreen to auto-dismiss.
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.castcharm.android.CastCharmApp
@@ -70,6 +86,10 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    // Updates episode.played in the UI state to reflect the current position
+    // without triggering a DB write — gives immediate visual feedback when the
+    // player crosses the threshold. The actual DB write happens in the progress
+    // sync loop (PlayerService or PlayerViewModel.progressTrackingJob).
     private fun reconcilePlayedForUi(
         episode: EpisodeEntity,
         positionMs: Long,
@@ -432,6 +452,10 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    // Starts a countdown coroutine that pauses playback when it reaches zero.
+    // Calling with minutes <= 0 cancels any existing timer (timer off).
+    // Replacing an existing timer by calling startSleepTimer() again is safe —
+    // the old job is cancelled before the new one starts.
     fun startSleepTimer(minutes: Int) {
         sleepTimerJob?.cancel()
 
@@ -460,6 +484,7 @@ class PlayerViewModel : ViewModel() {
             }
 
             if (isActive) {
+                // Timer expired — pause and reset the timer display.
                 playerController.pause()
                 _uiState.value = _uiState.value.copy(
                     sleepTimerMinutes = 0,
