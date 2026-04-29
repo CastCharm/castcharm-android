@@ -1,4 +1,3 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
 // PlayerScreen is a full-screen player launched by tapping the MiniPlayerBar.
 // It shows the episode artwork, title, feed, playback controls (back 30s, play/pause,
 // forward 30s), a scrubber with position and duration, a speed picker, sleep timer,
@@ -70,6 +69,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,7 +106,9 @@ fun PlayerScreen(
         when {
             uiState.isLoading -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(
+                        modifier = Modifier.semantics { contentDescription = "Loading episode" }
+                    )
                 }
             }
 
@@ -335,7 +338,9 @@ fun SeekBarSection(
                 onSeek(newPosition)
                 isSeeking = false
             },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { contentDescription = "Seek position" }
         )
 
         Row(
@@ -394,7 +399,9 @@ fun PlaybackControls(
         ) {
             if (isBuffering) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(36.dp),
+                    modifier = Modifier
+                        .size(36.dp)
+                        .semantics { contentDescription = "Buffering" },
                     strokeWidth = 3.dp
                 )
             } else {
@@ -442,7 +449,7 @@ fun SecondaryControls(
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showSleepMenu by remember { mutableStateOf(false) }
 
-    val speeds = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f)
+    val speeds = listOf(0.5f, 0.7f, 1.0f, 1.2f, 1.5f, 1.7f, 2.0f, 2.5f, 3.0f)
     val sleepOptions = listOf(
         0 to "Off",
         5 to "5 min",

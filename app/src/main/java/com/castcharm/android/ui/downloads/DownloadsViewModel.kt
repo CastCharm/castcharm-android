@@ -196,6 +196,45 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
+    // isCancellable == false is the established signal for a permanent WorkManager failure
+    // (work_request_id set to "FAILED_PERMANENT"). Reschedules each, clears stale cached
+    // progress, then does a single refreshPhoneProgress() rather than one per episode.
+    fun retryAllFailedPhoneDownloads() {
+        viewModelScope.launch {
+            val failedIds = _uiState.value.phoneInProgress
+                .filter { it.progress?.isCancellable == false }
+                .map { it.episode.id }
+            failedIds.forEach { episodeId ->
+                downloadScheduler.scheduleDownload(episodeId)
+                lastKnownPhoneProgress.remove(episodeId)
+            }
+            if (failedIds.isNotEmpty()) refreshPhoneProgress()
+        }
+    }
+
+    // isCancellable == true covers both queued and actively running WorkManager tasks.
+    // Clears cached progress so the item disappears from the in-progress list immediately.
+    fun cancelAllQueuedPhoneDownloads() {
+        viewModelScope.launch {
+            val activeIds = _uiState.value.phoneInProgress
+                .filter { it.progress?.isCancellable == true }
+                .map { it.episode.id }
+            activeIds.forEach { episodeId ->
+                downloadScheduler.cancelDownload(episodeId)
+                lastKnownPhoneProgress.remove(episodeId)
+            }
+            if (activeIds.isNotEmpty()) refreshPhoneProgress()
+        }
+    }
+
+    fun retryServerDownload(episodeId: Int) {
+        viewModelScope.launch {
+            if (!CastCharmApp.apiClient.isInitialized) return@launch
+            runCatching { CastCharmApp.apiClient.getApi().retryServerDownload(episodeId) }
+            refreshOnlineSnapshot()
+        }
+    }
+
     fun deleteEpisodeDownload(episode: EpisodeEntity) {
         viewModelScope.launch {
             episode.local_path?.let { path ->
@@ -491,7 +530,10 @@ class DownloadsViewModel : ViewModel() {
             }
         }
 
-        val canRefreshServer = hasServerInProgress &&
+        val hasActiveServerInProgress = _uiState.value.serverInProgress.any {
+            it.episode.status == "queued" || it.episode.status == "downloading"
+        }
+        val canRefreshServer = hasActiveServerInProgress &&
                 !CastCharmApp.isOfflineMode &&
                 CastCharmApp.apiClient.isInitialized
 
@@ -529,21 +571,30 @@ class DownloadsViewModel : ViewModel() {
             .map { it.episode_id }
             .toSet()
 
-        val queued = runCatching {
+        val queuedResult = runCatching {
             api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
-
-        val downloading = runCatching {
+        }
+        val downloadingResult = runCatching {
             api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
-
-        val downloaded = runCatching {
+        }
+        val downloadedResult = runCatching {
             api.getAllEpisodes(status = "downloaded", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
-
-        val failed = runCatching {
+        }
+        val failedResult = runCatching {
             api.getAllEpisodes(status = "failed", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
+        }
+
+        // If every API call failed (server unreachable), bail before touching the DB.
+        // Running the stale cleanup with all-empty results would incorrectly reset
+        // every currently-shown server episode to "pending".
+        val anyCallSucceeded = listOf(queuedResult, downloadingResult, downloadedResult, failedResult)
+            .any { it.isSuccess }
+        if (!anyCallSucceeded) return
+
+        val queued = queuedResult.getOrDefault(emptyList())
+        val downloading = downloadingResult.getOrDefault(emptyList())
+        val downloaded = downloadedResult.getOrDefault(emptyList())
+        val failed = failedResult.getOrDefault(emptyList())
 
         val remoteEpisodesById = linkedMapOf<Int, EpisodeEntity>()
         val allRemote = listOf(queued, downloading, downloaded, failed).flatten()
@@ -566,7 +617,13 @@ class DownloadsViewModel : ViewModel() {
 
         val activeServerIds = (queued.map { it.id } + downloading.map { it.id }).toSet()
         val resolvedServerIds = remoteEpisodesById.keys
+
+        // Exclude failed episodes from stale cleanup: they should persist until the
+        // user retries or a full snapshot confirms the server resolved them. If the
+        // `failed` API call itself returned an error, failed episodes won't be in
+        // resolvedServerIds, and without this filter they'd be incorrectly reset to pending.
         val stalePreviouslyShownServerIds = _uiState.value.serverInProgress
+            .filter { it.episode.status != "failed" }
             .map { it.episode.id }
             .filter { it !in activeServerIds && it !in phoneDownloadEpisodeIds }
             .distinct()
@@ -595,14 +652,19 @@ class DownloadsViewModel : ViewModel() {
             .map { it.episode_id }
             .toSet()
 
-        val queued = runCatching {
+        val queuedResult = runCatching {
             api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
-
-        val downloading = runCatching {
+        }
+        val downloadingResult = runCatching {
             api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
-        }.getOrDefault(emptyList())
+        }
 
+        // If both calls failed (server unreachable), bail — running the stale cleanup
+        // with empty results would incorrectly reset active episodes to "pending".
+        if (queuedResult.isFailure && downloadingResult.isFailure) return
+
+        val queued = queuedResult.getOrDefault(emptyList())
+        val downloading = downloadingResult.getOrDefault(emptyList())
         val activeRemote = (queued + downloading).distinctBy { it.id }
 
         val mergedActive = activeRemote.map { remote ->
@@ -622,6 +684,7 @@ class DownloadsViewModel : ViewModel() {
 
         val activeServerIds = activeRemote.map { it.id }.toSet()
         val stalePreviouslyShownServerIds = _uiState.value.serverInProgress
+            .filter { it.episode.status != "failed" }
             .map { it.episode.id }
             .filter { it !in activeServerIds && it !in phoneDownloadEpisodeIds }
             .distinct()

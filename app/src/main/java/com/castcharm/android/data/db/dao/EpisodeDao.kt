@@ -119,7 +119,7 @@ interface EpisodeDao {
 
     // Used by MainActivity to show the animated spinner on the Downloads tab icon
     // and by DownloadsViewModel for the "Saving to Server" section.
-    @Query("SELECT * FROM episodes WHERE status IN ('queued', 'downloading') ORDER BY published_at DESC")
+    @Query("SELECT * FROM episodes WHERE status IN ('queued', 'downloading', 'failed') ORDER BY published_at DESC")
     fun getInProgressEpisodes(): Flow<List<EpisodeEntity>>
 
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId ORDER BY published_at DESC")

@@ -1,7 +1,6 @@
 package com.castcharm.android.ui.theme
 
 import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -45,7 +44,14 @@ private val CastCharmDarkScheme = darkColorScheme(
     error = ErrorRed,
     onError = Color.White,
     inverseSurface = LightSurface,
-    inverseOnSurface = LightTextPrimary
+    inverseOnSurface = LightTextPrimary,
+    surfaceDim = DarkBackground,
+    surfaceBright = DarkSurfaceVariant,
+    surfaceContainerLowest = DarkBackground,
+    surfaceContainerLow = DarkSurface,
+    surfaceContainer = DarkSurfaceVariant,
+    surfaceContainerHigh = DarkBorder,
+    surfaceContainerHighest = DarkBorder,
 )
 
 // ---- Light color scheme -----------------------------------------------------
@@ -68,17 +74,35 @@ private val CastCharmLightScheme = lightColorScheme(
     error = ErrorRed,
     onError = Color.White,
     inverseSurface = DarkSurface,
-    inverseOnSurface = DarkTextPrimary
+    inverseOnSurface = DarkTextPrimary,
+    surfaceDim = LightSurfaceVariant,
+    surfaceBright = LightSurface,
+    surfaceContainerLowest = LightSurface,
+    surfaceContainerLow = LightBackground,
+    surfaceContainer = LightSurfaceVariant,
+    surfaceContainerHigh = LightBorder,
+    surfaceContainerHighest = LightBorder,
 )
 
 @Composable
 fun CastCharmTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeKey: String = "system",
     fontScale: Float = 1.0f,
     content: @Composable () -> Unit
 ) {
-    // Select the color scheme based on the current dark/light preference.
-    val colorScheme = if (darkTheme) CastCharmDarkScheme else CastCharmLightScheme
+    val systemIsDark = isSystemInDarkTheme()
+    val named = ALL_NAMED_THEMES[themeKey]
+    val darkTheme: Boolean
+    val colorScheme: ColorScheme
+    when {
+        named != null -> {
+            darkTheme = named.isDark
+            colorScheme = named.colorScheme
+        }
+        themeKey == "light" -> { darkTheme = false; colorScheme = CastCharmLightScheme }
+        themeKey == "dark"  -> { darkTheme = true;  colorScheme = CastCharmDarkScheme  }
+        else                -> { darkTheme = systemIsDark; colorScheme = if (systemIsDark) CastCharmDarkScheme else CastCharmLightScheme }
+    }
 
     // Build a scaled copy of AppTypography. Using remember(fontScale) avoids
     // rebuilding the Typography object on every recomposition — it is only

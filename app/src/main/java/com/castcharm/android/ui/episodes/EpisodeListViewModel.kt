@@ -34,6 +34,7 @@ data class EpisodeListUiState(
     val activePhoneDownloadEpisodeIds: Set<Int> = emptySet(),
     val isInitialLoading: Boolean = true,
     val isRefreshing: Boolean = false,
+    val isSyncing: Boolean = false,
     val errorMessage: String? = null,
     val hasMore: Boolean = false,
     val selectedEpisodes: Set<Int> = emptySet()
@@ -145,6 +146,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                     _uiState.update {
                         it.copy(
                             isRefreshing = false,
+                            isSyncing = false,
                             isInitialLoading = false,
                             hasMore = false,
                             errorMessage = null
@@ -193,6 +195,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                     it.copy(
                         feed = refreshedFeed,
                         isRefreshing = false,
+                        isSyncing = false,
                         isInitialLoading = false,
                         hasMore = hasMore,
                         errorMessage = null
@@ -203,11 +206,28 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
+                        isSyncing = false,
                         isInitialLoading = false,
                         errorMessage = "Failed to refresh: ${e.localizedMessage}"
                     )
                 }
             }
+        }
+    }
+
+    // Tells the server to re-fetch this feed's RSS, then refreshes the local episode
+    // list. isSyncing stays true through the subsequent refreshEpisodes() call so the
+    // spinner remains visible without a gap.
+    fun syncFeed() {
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncing = true) }
+            runCatching { CastCharmApp.apiClient.getApi().refreshFeed(feedId) }
+                .onSuccess { refreshEpisodes() }
+                .onFailure { e ->
+                    Log.e("EpisodeListViewModel", "Sync feed failed", e)
+                    _uiState.update { it.copy(isSyncing = false, errorMessage = "Sync failed: ${e.localizedMessage}") }
+                }
         }
     }
 

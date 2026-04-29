@@ -36,12 +36,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,6 +66,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,6 +104,7 @@ fun EpisodeListScreen(
     var expandedEpisodeId by remember { mutableStateOf<Int?>(null) }
     val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
     var showDownloadConfirm by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
 
     if (showDownloadConfirm) {
         AlertDialog(
@@ -174,23 +180,37 @@ fun EpisodeListScreen(
                             )
                         }
 
-                        uiState.isRefreshing -> {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .padding(10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            }
-                        }
-
                         else -> {
-                            IconButton(onClick = { viewModel.refreshEpisodes() }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            if (uiState.isRefreshing || uiState.isSyncing) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .padding(10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .semantics {
+                                                contentDescription = if (uiState.isSyncing) "Syncing feed" else "Refreshing"
+                                            },
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { showMenu = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(
+                                expanded = showMenu,
+                                onDismissRequest = { showMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Sync Feed") },
+                                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                    enabled = !uiState.isSyncing && !uiState.isRefreshing,
+                                    onClick = { showMenu = false; viewModel.syncFeed() }
+                                )
                             }
                         }
                     }
@@ -297,7 +317,11 @@ fun EpisodeListScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (uiState.isRefreshing) {
-                                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .semantics { contentDescription = "Loading more episodes" }
+                                    )
                                 } else {
                                     OutlinedButton(onClick = { viewModel.loadMore() }) {
                                         Text("Load More")
@@ -406,7 +430,9 @@ private fun FeedHeaderSkeleton() {
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier
+                        .size(22.dp)
+                        .semantics { contentDescription = "Loading" },
                     strokeWidth = 2.dp
                 )
             }

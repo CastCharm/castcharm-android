@@ -62,6 +62,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -238,7 +240,9 @@ fun EpisodeCard(
 
                             EpisodeDownloadActionOverride.PHONE_IN_PROGRESS -> {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .semantics { contentDescription = "Downloading to phone" },
                                     strokeWidth = 1.5.dp,
                                     color = MaterialTheme.colorScheme.primary,
                                     trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
@@ -256,7 +260,9 @@ fun EpisodeCard(
 
                             EpisodeDownloadActionOverride.SERVER_DOWNLOADING -> {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .semantics { contentDescription = "Downloading on server" },
                                     strokeWidth = 1.5.dp,
                                     color = MaterialTheme.colorScheme.tertiary,
                                     trackColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
@@ -494,7 +500,9 @@ fun EpisodeCardSkeleton() {
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier
+                        .size(18.dp)
+                        .semantics { contentDescription = "Loading" },
                     strokeWidth = 2.dp
                 )
             }

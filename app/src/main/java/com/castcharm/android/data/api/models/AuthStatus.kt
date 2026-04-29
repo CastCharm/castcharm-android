@@ -24,6 +24,13 @@ data class ProgressRequest(
     val position_seconds: Int
 )
 
+// POST /api/feeds body. url is the only required field; the server resolves
+// redirects and detects RSS from podcast page URLs automatically.
+data class AddFeedRequest(
+    val url: String,
+    val download_all: Boolean = false
+)
+
 // GET /api/settings response. Only the fields the Android app uses are mapped;
 // remaining server fields are ignored by Moshi (lenient parsing).
 data class GlobalSettingsOut(
@@ -53,5 +60,6 @@ data class AppStatus(
     val download_queue_size: Int = 0,
     val active_downloads: Int = 0,
     val syncing_count: Int = 0,
+    val syncing_feed_ids: List<Int> = emptyList(),
     val version: String = ""
 )

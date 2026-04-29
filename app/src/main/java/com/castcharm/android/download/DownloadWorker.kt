@@ -40,7 +40,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
-private const val MAX_DOWNLOAD_ATTEMPTS = 3
+private const val MAX_DOWNLOAD_ATTEMPTS = 5
 
 class DownloadWorker(
     context: Context,

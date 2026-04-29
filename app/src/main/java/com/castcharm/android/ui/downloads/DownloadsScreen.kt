@@ -37,12 +37,15 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -65,6 +68,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,6 +102,10 @@ fun DownloadsScreen(
     var showDeleteSelectedConfirm by remember { mutableStateOf(false) }
     var pendingFeedDelete by remember { mutableStateOf<Int?>(null) }
     var pendingEpisodeDelete by remember { mutableStateOf<EpisodeEntity?>(null) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
+
+    val hasPhoneFailed = uiState.phoneInProgress.any { it.progress?.isCancellable == false }
+    val hasPhoneActive = uiState.phoneInProgress.any { it.progress?.isCancellable == true }
 
     LaunchedEffect(isOfflineMode, refreshToken) {
         viewModel.onScreenVisible(isOfflineMode = isOfflineMode)
@@ -207,29 +216,57 @@ fun DownloadsScreen(
                             }
                         }
 
-                        uiState.isRefreshing -> {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .padding(10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            }
-                        }
-
                         !isOfflineMode -> {
-                            IconButton(
-                                onClick = {
-                                    scope.launch {
-                                        viewModel.refreshForCurrentMode(isOfflineMode = false)
-                                    }
+                            // Show a spinner alongside the menu while refreshing so the menu stays accessible.
+                            if (uiState.isRefreshing) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .padding(10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .semantics { contentDescription = "Refreshing downloads" },
+                                        strokeWidth = 2.dp
+                                    )
                                 }
+                            }
+                            IconButton(onClick = { showOverflowMenu = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false }
                             ) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Refresh downloads")
+                                DropdownMenuItem(
+                                    text = { Text("Refresh") },
+                                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                    enabled = !uiState.isRefreshing,
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        scope.launch { viewModel.refreshForCurrentMode(isOfflineMode = false) }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Retry All Failed") },
+                                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                    enabled = hasPhoneFailed,
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        viewModel.retryAllFailedPhoneDownloads()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Cancel All Queued") },
+                                    leadingIcon = { Icon(Icons.Default.Close, contentDescription = null) },
+                                    enabled = hasPhoneActive,
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        viewModel.cancelAllQueuedPhoneDownloads()
+                                    }
+                                )
                             }
                         }
                     }
@@ -336,16 +373,27 @@ fun DownloadsScreen(
                                     if (uiState.downloadedFeeds.isNotEmpty() || uiState.phoneInProgress.isNotEmpty()) {
                                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                                     }
+                                    val hasServerFailed = uiState.serverInProgress.any { it.episode.status == "failed" }
+                                    val hasServerActive = uiState.serverInProgress.any { it.episode.status != "failed" }
                                     SectionHeader(
-                                        title = "Saving to Server",
-                                        subtitle = "These files are not on your phone yet. Phone save becomes available after the server download completes."
+                                        title = "Server Downloads",
+                                        subtitle = when {
+                                            hasServerFailed && hasServerActive -> "Some downloads failed on the server. Others are still in progress."
+                                            hasServerFailed -> "These server downloads failed. You can retry them from here."
+                                            else -> "These files are not on your phone yet. Phone save becomes available after the server download completes."
+                                        }
                                     )
                                 }
                                 items(
                                     items = uiState.serverInProgress,
                                     key = { "root_server_${it.episode.id}" }
                                 ) { item ->
-                                    ServerInProgressCard(item = item)
+                                    ServerInProgressCard(
+                                        item = item,
+                                        onRetry = if (item.episode.status == "failed") {
+                                            { viewModel.retryServerDownload(item.episode.id) }
+                                        } else null
+                                    )
                                 }
                             }
                         }
@@ -474,9 +522,15 @@ fun DownloadsScreen(
                                     if (uiState.currentFeedDownloadedEpisodes.isNotEmpty() || uiState.currentFeedPhoneInProgress.isNotEmpty()) {
                                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                                     }
+                                    val hasFeedServerFailed = uiState.currentFeedServerInProgress.any { it.episode.status == "failed" }
+                                    val hasFeedServerActive = uiState.currentFeedServerInProgress.any { it.episode.status != "failed" }
                                     SectionHeader(
-                                        title = "Saving to Server",
-                                        subtitle = "These files are downloading on the server, not on your phone."
+                                        title = "Server Downloads",
+                                        subtitle = when {
+                                            hasFeedServerFailed && hasFeedServerActive -> "Some downloads failed on the server. Others are still in progress."
+                                            hasFeedServerFailed -> "These server downloads failed. You can retry them from here."
+                                            else -> "These files are downloading on the server, not on your phone."
+                                        }
                                     )
                                 }
 
@@ -514,7 +568,7 @@ fun DownloadsScreen(
                                         },
                                         onPlay = { onPlayEpisode(episode.id) },
                                         onTogglePlayedStatus = { viewModel.togglePlayed(episode.id, episode.played) },
-                                        onDownloadToServer = {},
+                                        onDownloadToServer = { viewModel.retryServerDownload(episode.id) },
                                         onDownloadToDevice = {},
                                         downloadActionOverride = overrideState
                                     )
@@ -695,8 +749,10 @@ private fun InProgressDownloadCard(
 
 @Composable
 private fun ServerInProgressCard(
-    item: DownloadItem
+    item: DownloadItem,
+    onRetry: (() -> Unit)? = null
 ) {
+    val isFailed = item.episode.status == "failed"
     val percent = when (item.episode.status) {
         "queued", "pending" -> 0
         "downloading" -> item.episode.download_progress.coerceIn(0, 100)
@@ -706,6 +762,7 @@ private fun ServerInProgressCard(
         "queued" -> "Queued on Server"
         "pending" -> "Queued on Server"
         "downloading" -> "Downloading on Server"
+        "failed" -> "Server Download Failed"
         else -> item.episode.status.replaceFirstChar { it.uppercase() }
     }
 
@@ -749,10 +806,13 @@ private fun ServerInProgressCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (percent > 0) "$statusText • $percent%" else statusText,
-                        style = MaterialTheme.typography.labelMedium
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = if (percent > 0) {
+                        text = if (isFailed) {
+                            "The server failed to download this file."
+                        } else if (percent > 0) {
                             "Progress reported by server."
                         } else {
                             "Waiting for updated server progress."
@@ -762,12 +822,22 @@ private fun ServerInProgressCard(
                     )
                 }
 
-                Icon(
-                    imageVector = if (item.episode.status == "downloading") Icons.Default.CloudDownload else Icons.Default.Schedule,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
+                if (isFailed && onRetry != null) {
+                    TextButton(
+                        onClick = onRetry,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Retry")
+                    }
+                } else if (!isFailed) {
+                    val isDownloading = item.episode.status == "downloading"
+                    Icon(
+                        imageVector = if (isDownloading) Icons.Default.CloudDownload else Icons.Default.Schedule,
+                        contentDescription = if (isDownloading) "Downloading on server" else "Queued on server",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }
@@ -824,7 +894,9 @@ private fun InProgressDownloadSkeleton() {
                     )
                 }
                 CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .semantics { contentDescription = "Loading" },
                     strokeWidth = 2.dp
                 )
             }
@@ -905,7 +977,9 @@ private fun FeedDownloadCardSkeleton() {
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .semantics { contentDescription = "Loading" },
                     strokeWidth = 2.dp
                 )
             }

@@ -60,6 +60,11 @@ interface CastCharmApi {
     @GET("api/feeds/{feed_id}/cover.jpg")
     suspend fun getFeedCoverImage(@Path("feed_id") feedId: Int): ResponseBody
 
+    // Adds a new feed by URL. The server resolves redirects and detects RSS
+    // from podcast page URLs, so the raw URL the user types is fine.
+    @POST("api/feeds")
+    suspend fun addFeed(@Body body: AddFeedRequest): FeedOut
+
     // Triggers the server to refresh all subscribed RSS feeds.
     @POST("api/feeds/refresh-all")
     suspend fun refreshAllFeeds()
@@ -96,6 +101,10 @@ interface CastCharmApi {
     // Asks the server to queue a server-side download for this episode.
     @POST("api/episodes/{episode_id}/download")
     suspend fun queueDownload(@Path("episode_id") episodeId: Int)
+
+    // Retries a failed server-side download (server endpoint accepts failed/pending/skipped).
+    @POST("api/episodes/{episode_id}/retry")
+    suspend fun retryServerDownload(@Path("episode_id") episodeId: Int)
 
     // ---- Progress tracking --------------------------------------------------
     // Persists the current playback position to the server. Called every 10s

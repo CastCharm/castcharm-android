@@ -28,6 +28,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -84,7 +86,9 @@ fun SkeletonImageBox(
     ) {
         if (showSpinner) {
             CircularProgressIndicator(
-                modifier = Modifier.size(size * 0.4f),
+                modifier = Modifier
+                    .size(size * 0.4f)
+                    .semantics { contentDescription = "Loading" },
                 strokeWidth = 2.dp
             )
         }
@@ -116,7 +120,9 @@ fun SkeletonListRow(
 
         if (showTrailingSpinner) {
             CircularProgressIndicator(
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier
+                    .size(20.dp)
+                    .semantics { contentDescription = "Loading" },
                 strokeWidth = 2.dp
             )
         }

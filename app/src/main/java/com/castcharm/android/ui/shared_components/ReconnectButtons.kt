@@ -19,6 +19,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 // Compact icon-button variant used in top app bars where space is limited.
@@ -29,7 +31,7 @@ fun ReconnectIconButton(
     onClick: () -> Unit,
     inFlight: Boolean,
     modifier: Modifier = Modifier,
-    contentDescription: String = "Retry connection",
+    iconLabel: String = "Retry connection",
     icon: ImageVector = Icons.Default.Refresh
 ) {
     IconButton(
@@ -39,13 +41,15 @@ fun ReconnectIconButton(
     ) {
         if (inFlight) {
             CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier
+                    .size(18.dp)
+                    .semantics { contentDescription = "Reconnecting" },
                 strokeWidth = 2.dp
             )
         } else {
             Icon(
                 imageVector = icon,
-                contentDescription = contentDescription
+                contentDescription = iconLabel
             )
         }
     }
@@ -69,7 +73,9 @@ fun ReconnectOutlinedButton(
     ) {
         if (inFlight) {
             CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier
+                    .size(16.dp)
+                    .semantics { contentDescription = "Reconnecting" },
                 strokeWidth = 2.dp
             )
             Spacer(Modifier.width(8.dp))

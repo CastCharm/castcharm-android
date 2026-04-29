@@ -12,8 +12,8 @@ android {
         applicationId = "com.castcharm.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -49,25 +49,25 @@ kotlin {
 
 dependencies {
     // Core
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
 
     // Compose
-    val composeBom = platform("androidx.compose:compose-bom:2024.01.00")
+    val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
     debugImplementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3:1.2.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.3")
+    implementation("androidx.navigation:navigation-compose:2.8.4")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Lifecycle
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
 
     // Room
     val roomVersion = "2.8.4"
@@ -79,7 +79,7 @@ dependencies {
     val retrofitVersion = "2.10.0"
     implementation("com.squareup.retrofit2:retrofit:$retrofitVersion")
     implementation("com.squareup.retrofit2:converter-moshi:$retrofitVersion")
-    val okHttpVersion = "4.11.0"
+    val okHttpVersion = "4.12.0"
     implementation("com.squareup.okhttp3:okhttp:$okHttpVersion")
     implementation("com.squareup.okhttp3:logging-interceptor:$okHttpVersion")
 
@@ -110,12 +110,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // Coroutines
-    val coroutinesVersion = "1.7.3"
+    val coroutinesVersion = "1.9.0"
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
 
     // DataStore (for SharedPreferences replacement)
-    implementation("androidx.datastore:datastore-preferences:1.0.0")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     // Guava (for Futures)
     implementation("com.google.guava:guava:32.1.3-android")

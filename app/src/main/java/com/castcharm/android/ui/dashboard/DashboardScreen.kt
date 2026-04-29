@@ -34,6 +34,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -252,7 +254,9 @@ fun DashboardScreen(
                         ) {
                             if (uiState.suggestionsLoading) {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .semantics { contentDescription = "Refreshing suggestions" },
                                     strokeWidth = 2.dp
                                 )
                             } else {
@@ -372,7 +376,9 @@ private fun DashboardCard(
 
                 if (isLoading && action == null) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier
+                            .size(16.dp)
+                            .semantics { contentDescription = "Loading $title" },
                         strokeWidth = 2.dp
                     )
                 } else {
@@ -410,7 +416,9 @@ private fun StatCard(
                 Spacer(Modifier.width(8.dp))
                 if (isLoading) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
+                        modifier = Modifier
+                            .size(14.dp)
+                            .semantics { contentDescription = "Loading $label" },
                         strokeWidth = 2.dp
                     )
                 }

@@ -168,25 +168,31 @@ private fun ensureApiClientInitializedBlocking(context: Context): String = runBl
 // Custom SessionCommand sent from the speed button in the notification / Android Auto.
 // The handler in onCustomCommand() cycles through SPEEDS.
 private val SPEED_COMMAND = SessionCommand("com.castcharm.android.CYCLE_SPEED", Bundle.EMPTY)
-private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+private val SPEEDS = listOf(0.5f, 0.7f, 1.0f, 1.2f, 1.5f, 1.7f, 2.0f, 2.5f, 3.0f)
 // Episodes are marked played when position reaches 98% of duration.
 private const val PLAYED_THRESHOLD_PCT = 0.98f
 
 private fun speedLabel(speed: Float) = when (speed) {
-    0.75f -> "0.75×"
+    0.5f -> "0.5×"
+    0.7f -> "0.7×"
     1.0f -> "1.0×"
-    1.25f -> "1.25×"
+    1.2f -> "1.2×"
     1.5f -> "1.5×"
+    1.7f -> "1.7×"
     2.0f -> "2.0×"
-    else -> "%.2f×".format(speed)
+    2.5f -> "2.5×"
+    3.0f -> "3.0×"
+    else -> "%.1f×".format(speed)
 }
 
 // Builds the now-playing subtitle shown in the notification and Android Auto.
-// Format: "Feed Title • 1.5×" (or just "1.5×" if no feed title is available).
+// The current playback speed is rendered into the speed CommandButton's icon
+// (see speedIconUri / PodcastArtworkProvider) so we no longer append it to
+// the subtitle, where long feed titles routinely truncated it.
 private fun buildNowPlayingSubtitle(feedTitle: String?, speed: Float): String {
-    val label = speedLabel(speed)
-    return if (feedTitle.isNullOrBlank()) label else "$feedTitle • $label"
+    return feedTitle.orEmpty()
 }
+
 
 // Extracts the raw feed title from MediaMetadata, stripping the speed label
 // suffix that buildNowPlayingSubtitle() appends. Used when refreshing metadata
@@ -237,11 +243,23 @@ private fun isOfflineHiddenSection(parentId: String): Boolean {
 // Speed cycle button shown in the notification shade and Android Auto overflow.
 // SLOT_OVERFLOW places it in the "more actions" menu rather than primary controls.
 @OptIn(UnstableApi::class)
+private fun speedIconResId(speed: Float): Int = when {
+    speed < 0.6f  -> R.drawable.ic_play_speed_0_5x
+    speed < 0.85f -> R.drawable.ic_play_speed_0_7x
+    speed < 1.1f  -> R.drawable.ic_play_speed_1_0x
+    speed < 1.35f -> R.drawable.ic_play_speed_1_2x
+    speed < 1.6f  -> R.drawable.ic_play_speed_1_5x
+    speed < 1.85f -> R.drawable.ic_play_speed_1_7x
+    speed < 2.25f -> R.drawable.ic_play_speed_2_0x
+    speed < 2.75f -> R.drawable.ic_play_speed_2_5x
+    else          -> R.drawable.ic_play_speed_3_0x
+}
+
 private fun createSpeedButton(speed: Float): CommandButton =
     CommandButton.Builder(CommandButton.ICON_UNDEFINED)
         .setSessionCommand(SPEED_COMMAND)
         .setDisplayName(speedLabel(speed))
-        .setCustomIconResId(R.drawable.ic_speed)
+        .setCustomIconResId(speedIconResId(speed))
         .setSlots(CommandButton.SLOT_OVERFLOW)
         .build()
 
@@ -419,11 +437,14 @@ class PlayerService : MediaLibraryService() {
                 // Speed changes need to be reflected in the now-playing metadata subtitle
                 // and the speed button label. Both are updated here synchronously.
                 override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
-                    latestPlaybackSpeed = playbackParameters.speed
-                    callback.updateLatestPlaybackSpeed(playbackParameters.speed)
+                    val speed = playbackParameters.speed
+                    latestPlaybackSpeed = speed
+                    callback.updateLatestPlaybackSpeed(speed)
+
+                    mediaSession?.setMediaButtonPreferences(initialMediaButtonPreferences(speed))
 
                     serviceScope.launch {
-                        refreshNowPlayingSpeedMetadata(playbackParameters.speed)
+                        refreshNowPlayingSpeedMetadata(speed)
                     }
                 }
             })
@@ -838,11 +859,19 @@ private class PlayerLibrarySessionCallback(
             latestPlaybackSpeed = next
             player.setPlaybackSpeed(next)
 
+            // Push the updated button (with the new icon) to all connected controllers
+            // so Android Auto refreshes the speed icon immediately.
+            val newButtons = initialMediaButtonPreferences(next)
+            session.setMediaButtonPreferences(newButtons)
+
+            // Capture the mediaId on the calling (main) thread — Player must not be
+            // accessed from the IO dispatcher the coroutine below runs on.
+            val episodeId = player.currentMediaItem?.mediaId
+                ?.removePrefix("episode_")?.toIntOrNull()
+
             // Persist the speed change for this feed so it survives session restarts.
             scope.launch {
-                val feedId = player.currentMediaItem?.mediaId
-                    ?.removePrefix("episode_")?.toIntOrNull()
-                    ?.let { episodeDao.getEpisodeOnce(it)?.feed_id }
+                val feedId = episodeId?.let { episodeDao.getEpisodeOnce(it)?.feed_id }
                 if (feedId != null) {
                     feedDao.updatePlaybackSpeed(feedId, next)
                 }
@@ -1100,13 +1129,18 @@ private class PlayerLibrarySessionCallback(
                     ?.removePrefix("episode_")
                     ?.toIntOrNull()
 
-                val savedResumeMs = selectedEpisodeId?.let { id ->
-                    episodeDao.getEpisodeOnce(id)
-                        ?.takeIf { !it.played }
-                        ?.play_position_seconds
-                        ?.takeIf { it > 0 }
-                        ?.let { maxOf(0L, it * 1000L - 5000L) }
-                } ?: 0L
+                val dbEpisode = selectedEpisodeId?.let { episodeDao.getEpisodeOnce(it) }
+                val savedResumeMs = dbEpisode
+                    ?.takeIf { !it.played }
+                    ?.play_position_seconds
+                    ?.takeIf { it > 0 }
+                    ?.let { maxOf(0L, it * 1000L - 5000L) }
+                    ?: 0L
+
+                Log.d(TAG, "onSetMediaItems mediaId=${selectedItem?.mediaId} " +
+                    "incomingStartMs=$startPositionMs savedResumeMs=$savedResumeMs " +
+                    "dbPos=${dbEpisode?.play_position_seconds} played=${dbEpisode?.played} " +
+                    "pkg=${controller.packageName}")
 
                 val finalStartPositionMs = when {
                     startPositionMs > 0L -> startPositionMs
@@ -1171,6 +1205,25 @@ private class PlayerLibrarySessionCallback(
 
         val feedTitle = feed?.title ?: "Unknown Podcast"
         val artworkUri = resolveEpisodeArtworkUri(context, episode)
+        // Embed artwork as artworkData for the AA player screen. artworkUri alone
+        // is sufficient for browse thumbnails but AA's player UI requires an embedded
+        // Bitmap via METADATA_KEY_ALBUM_ART. We transcode to JPEG here because the
+        // cached .img file may be WEBP or PNG, which Gearhead fails to decode,
+        // causing the repeated-fetch loop and fallback to the app icon.
+        val artworkBytes = withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.openInputStream(artworkUri)?.use { stream ->
+                    val raw = stream.readBytes()
+                    val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
+                    if (bmp != null) {
+                        val out = java.io.ByteArrayOutputStream()
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                        out.toByteArray()
+                    } else null
+                }
+            }.getOrNull()
+        }
+        Log.d(TAG, "resolveMediaItem episode=$episodeId artworkBytes=${artworkBytes?.size ?: "null"}")
 
         val feedSpeed = feed?.playback_speed ?: 1f
 
@@ -1190,7 +1243,16 @@ private class PlayerLibrarySessionCallback(
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_PODCAST)
-            .setArtworkUri(artworkUri)
+            // Prefer embedded JPEG bytes for the AA player screen — avoids the
+            // repeated-URI-fetch loop Gearhead enters when it can't decode the
+            // cached .img format. Fall back to URI only if transcoding failed.
+            .apply {
+                if (artworkBytes != null) {
+                    setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                } else {
+                    setArtworkUri(artworkUri)
+                }
+            }
             .setExtras(metadataExtras)
             .build()
 

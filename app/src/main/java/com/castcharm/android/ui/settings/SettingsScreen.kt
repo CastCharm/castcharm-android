@@ -34,6 +34,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -313,17 +315,10 @@ fun SettingsScreen(
                         }
 
                         Text("Theme", style = MaterialTheme.typography.labelLarge)
-                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                            listOf("system" to "System", "light" to "Light", "dark" to "Dark")
-                                .forEachIndexed { index, (mode, label) ->
-                                    SegmentedButton(
-                                        selected = uiState.themeMode == mode,
-                                        onClick = { viewModel.setThemeMode(mode) },
-                                        shape = SegmentedButtonDefaults.itemShape(index, 3),
-                                        label = { Text(label) }
-                                    )
-                                }
-                        }
+                        ThemeDropdown(
+                            currentKey = uiState.themeMode,
+                            onSelect = { viewModel.setThemeMode(it) }
+                        )
 
                         Spacer(Modifier.height(4.dp))
 
@@ -382,18 +377,22 @@ fun SettingsScreen(
                         if (total > 0) {
                             val castCharmFraction = (castCharm.toFloat() / total).coerceIn(0f, 1f)
                             val otherFraction = (otherUsed.toFloat() / total).coerceIn(0f, 1f - castCharmFraction)
+                            val primaryColor = MaterialTheme.colorScheme.primary
+                            val otherColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            val freeColor = MaterialTheme.colorScheme.outline
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp))
+                                    .height(10.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(freeColor)
                             ) {
                                 if (castCharmFraction > 0f) {
                                     Box(
                                         Modifier
                                             .weight(castCharmFraction)
                                             .fillMaxHeight()
-                                            .background(MaterialTheme.colorScheme.primary)
+                                            .background(primaryColor)
                                     )
                                 }
                                 if (otherFraction > 0f) {
@@ -401,7 +400,7 @@ fun SettingsScreen(
                                         Modifier
                                             .weight(otherFraction)
                                             .fillMaxHeight()
-                                            .background(MaterialTheme.colorScheme.outline)
+                                            .background(otherColor)
                                     )
                                 }
                                 val freeFraction = (1f - castCharmFraction - otherFraction).coerceAtLeast(0.01f)
@@ -409,23 +408,23 @@ fun SettingsScreen(
                                     Modifier
                                         .weight(freeFraction)
                                         .fillMaxHeight()
-                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .background(freeColor)
                                 )
                             }
                         }
 
-                        LegendRow(
-                            color = MaterialTheme.colorScheme.outline,
-                            label = "Total Storage",
-                            value = formatBytes(total)
-                        )
                         LegendRow(
                             color = MaterialTheme.colorScheme.primary,
                             label = "CastCharm Downloads",
                             value = formatBytes(castCharm)
                         )
                         LegendRow(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            label = "Other Apps",
+                            value = formatBytes((total - free - castCharm).coerceAtLeast(0))
+                        )
+                        LegendRow(
+                            color = MaterialTheme.colorScheme.outline,
                             label = "Free",
                             value = formatBytes(free)
                         )
@@ -441,7 +440,9 @@ fun SettingsScreen(
                             value = uiState.quotaGb.toFloat(),
                             onValueChange = { viewModel.updateQuota(it.toLong()) },
                             valueRange = 1f..maxQuota,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { contentDescription = "Download quota: ${uiState.quotaGb} gigabytes" }
                         )
 
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
@@ -455,7 +456,9 @@ fun SettingsScreen(
                             onValueChange = { viewModel.updateMaxConcurrentDownloads(it.toInt()) },
                             valueRange = 1f..6f,
                             steps = 4,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { contentDescription = "Concurrent downloads: ${uiState.maxConcurrentDownloads}" }
                         )
                         Text(
                             text = "How many episode downloads can run at the same time.",
@@ -472,7 +475,12 @@ fun SettingsScreen(
                             )
                         ) {
                             if (uiState.isClearing) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .semantics { contentDescription = "Clearing downloads" },
+                                    strokeWidth = 2.dp
+                                )
                                 Spacer(Modifier.width(8.dp))
                                 Text("Clearing...")
                             } else {
@@ -525,7 +533,7 @@ private fun LegendRow(color: androidx.compose.ui.graphics.Color, label: String, 
     ) {
         Box(
             Modifier
-                .size(10.dp)
+                .size(12.dp)
                 .clip(CircleShape)
                 .background(color)
         )
@@ -568,6 +576,81 @@ private fun ChangeServerDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+@Composable
+private fun ThemeDropdown(currentKey: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = com.castcharm.android.ui.theme.themeLabelFor(currentKey),
+            onValueChange = {},
+            readOnly = true,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
+                unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                unfocusedTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth()
+        )
+
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            // Top three: Follow System / Light Mode / Dark Mode
+            listOf(
+                "system" to "Follow System",
+                "light" to "Light Mode",
+                "dark" to "Dark Mode"
+            ).forEach { (key, label) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = { onSelect(key); expanded = false },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            // Named theme groups
+            com.castcharm.android.ui.theme.THEME_GROUPS.forEach { (groupLabel, themes) ->
+                // Non-interactive section header
+                Text(
+                    text = groupLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp)
+                )
+                themes.forEach { theme ->
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Two-dot swatch: surface bg + primary accent
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(theme.surface)
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(theme.primary)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(theme.label)
+                            }
+                        },
+                        onClick = { onSelect(theme.key); expanded = false },
+                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    )
+                }
+            }
+        }
+    }
 }
 
 fun formatBytes(bytes: Long): String {

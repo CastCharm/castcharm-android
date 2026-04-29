@@ -15,7 +15,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -186,10 +185,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val dataStore = CastCharmApp.instance.dataStore
 
-            // Collect theme and font-scale preferences from DataStore. Both are
+            // Collect theme key and font-scale preferences from DataStore. Both are
             // mapped to a Flow so the UI automatically re-renders when the user
             // changes them in Settings without needing to restart the app.
-            val themeMode by remember(dataStore) {
+            val themeKey by remember(dataStore) {
                 dataStore.data.map { it[THEME_KEY] ?: "system" }
             }.collectAsState(initial = "system")
 
@@ -197,15 +196,7 @@ class MainActivity : ComponentActivity() {
                 dataStore.data.map { it[FONT_SCALE_KEY] ?: 1.0f }
             }.collectAsState(initial = 1.0f)
 
-            // Resolve themeMode string to a boolean for CastCharmTheme.
-            // "system" defers to the OS dark-mode setting.
-            val darkTheme = when (themeMode) {
-                "light" -> false
-                "dark" -> true
-                else -> isSystemInDarkTheme()
-            }
-
-            CastCharmTheme(darkTheme = darkTheme, fontScale = fontScale) {
+            CastCharmTheme(themeKey = themeKey, fontScale = fontScale) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -799,7 +790,7 @@ fun MainScaffold(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
 
-                    NavigationBar {
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                         bottomNavItems.forEach { screen ->
                             // Determine if this tab is "selected" by checking whether any
                             // destination in the back stack hierarchy matches the route.
