@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import com.castcharm.android.BuildConfig
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.OfflineModePanel
 
@@ -219,7 +220,7 @@ fun SettingsScreen(
                         Spacer(Modifier.width(8.dp))
                         Text("About CastCharm", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     }
-                    Text("Version 1.0.0", style = MaterialTheme.typography.bodyMedium)
+                    Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium)
                     Text(
                         "Self-hosted podcast manager for your private collection.",
                         style = MaterialTheme.typography.bodySmall,
