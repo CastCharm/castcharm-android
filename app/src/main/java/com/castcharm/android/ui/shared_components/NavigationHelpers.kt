@@ -40,6 +40,18 @@ fun NavHostController.navigateToFeedEpisodes(feedId: Int) {
     }
 }
 
+fun NavHostController.navigateToFeedEpisodesHighlighted(feedId: Int, episodeId: Int) {
+    navigate("episodes/$feedId?highlight=$episodeId") {
+        launchSingleTop = true
+    }
+}
+
+fun NavHostController.navigateToSearch() {
+    navigate("search") {
+        launchSingleTop = true
+    }
+}
+
 // Navigate from the Dashboard "podcast" card to the episode list for that feed.
 // The user arrived via Dashboard, so we first switch the bottom nav to the Feeds
 // tab (clearing the back stack above the start destination), then push the episode

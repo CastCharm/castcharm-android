@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Podcasts
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
@@ -78,6 +79,7 @@ import com.castcharm.android.ui.shared_components.SkeletonArtworkCard
 fun FeedListScreen(
     viewModel: FeedListViewModel = viewModel(),
     onNavigateToEpisodes: (feedId: Int) -> Unit = {},
+    onSearchClick: (() -> Unit)? = null,
     isOfflineMode: Boolean = false,
     isReconnectInFlight: Boolean = false,
     onRetryConnection: (() -> Unit)? = null,
@@ -114,6 +116,11 @@ fun FeedListScreen(
             TopAppBar(
                 title = { AppTopBarTitle(text = "Podcasts") },
                 actions = {
+                    if (onSearchClick != null) {
+                        IconButton(onClick = onSearchClick) {
+                            Icon(Icons.Default.Search, contentDescription = "Search episodes")
+                        }
+                    }
                     if (isOfflineMode && onRetryConnection != null) {
                         ReconnectIconButton(
                             onClick = onRetryConnection,

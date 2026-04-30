@@ -82,7 +82,8 @@ interface CastCharmApi {
         @Query("limit") limit: Int = 200,
         @Query("offset") offset: Int = 0,
         @Query("include_hidden") includeHidden: Boolean = false,
-        @Query("order") order: String = "desc"
+        @Query("order") order: String = "desc",
+        @Query("search") search: String? = null
     ): List<EpisodeOut>
 
     @GET("api/episodes/{episode_id}")

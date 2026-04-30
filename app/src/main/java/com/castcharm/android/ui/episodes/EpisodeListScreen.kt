@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -57,7 +58,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +91,7 @@ import com.castcharm.android.ui.shared_components.stripHtml
 fun EpisodeListScreen(
     feedId: Int,
     viewModel: EpisodeListViewModel,
+    highlightEpisodeId: Int? = null,
     onPlayEpisode: (episodeId: Int) -> Unit = {},
     onNavigateBack: () -> Unit = {},
     isOfflineMode: Boolean = false,
@@ -101,7 +107,36 @@ fun EpisodeListScreen(
         ""
     }
     val snackbarHostState = remember { SnackbarHostState() }
-    var expandedEpisodeId by remember { mutableStateOf<Int?>(null) }
+    // Auto-expand the highlighted episode (navigated from search).
+    var expandedEpisodeId by remember { mutableStateOf<Int?>(highlightEpisodeId) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(highlightEpisodeId) {
+        if (highlightEpisodeId == null) return@LaunchedEffect
+        val idx = withTimeoutOrNull(30_000) {
+            // Wait for both the DB load and the API refresh to finish.
+            // hasMore is only populated after the API call returns, so checking
+            // only !isInitialLoading exits the loop too early with hasMore=false.
+            viewModel.uiState.first { !it.isInitialLoading && !it.isRefreshing }
+            // Walk through pages until the episode is found or there are no more
+            while (true) {
+                val state = viewModel.uiState.value
+                val foundIdx = state.episodes.indexOfFirst { it.id == highlightEpisodeId }
+                if (foundIdx >= 0) return@withTimeoutOrNull foundIdx
+                if (!state.hasMore) break
+                val prevSize = state.episodes.size
+                viewModel.loadMore()
+                // Wait for this page to land before checking again
+                viewModel.uiState.first { !it.isRefreshing && (it.episodes.size != prevSize || !it.hasMore) }
+            }
+            null
+        } ?: return@LaunchedEffect
+        // Wait until the LazyColumn has laid out enough items to reach this index.
+        // +1 accounts for the feed header item at position 0.
+        snapshotFlow { listState.layoutInfo.totalItemsCount }
+            .first { it > idx + 1 }
+        listState.animateScrollToItem(idx + 1)
+    }
     val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
     var showDownloadConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
@@ -253,6 +288,7 @@ fun EpisodeListScreen(
 
             else -> {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 8.dp,

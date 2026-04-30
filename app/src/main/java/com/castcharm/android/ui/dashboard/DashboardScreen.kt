@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Podcasts
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,9 +56,11 @@ import com.castcharm.android.ui.shared_components.SkeletonListRow
 fun DashboardScreen(
     viewModel: DashboardViewModel = viewModel(),
     onNavigateToFeed: (feedId: Int) -> Unit = {},
+    onNavigateToEpisode: (feedId: Int, episodeId: Int) -> Unit = { feedId, _ -> onNavigateToFeed(feedId) },
     onPlayEpisode: (episodeId: Int) -> Unit = {},
     onNavigateToFeeds: () -> Unit = {},
     onNavigateToDownloads: () -> Unit = {},
+    onSearchClick: (() -> Unit)? = null,
     isOfflineMode: Boolean = false,
     isReconnectInFlight: Boolean = false,
     onRetryConnection: (() -> Unit)? = null
@@ -77,6 +80,11 @@ fun DashboardScreen(
             TopAppBar(
                 title = { AppTopBarTitle("CastCharm") },
                 actions = {
+                    if (onSearchClick != null) {
+                        IconButton(onClick = onSearchClick) {
+                            Icon(Icons.Default.Search, contentDescription = "Search episodes")
+                        }
+                    }
                     if (isOfflineMode && onRetryConnection != null) {
                         ReconnectIconButton(
                             onClick = onRetryConnection,
@@ -205,7 +213,7 @@ fun DashboardScreen(
                                     sub = item.episode.play_position_seconds.let { pos ->
                                         if (pos > 59) "${pos / 60}m in" else ""
                                     },
-                                    onTitleClick = { onNavigateToFeed(item.episode.feed_id) },
+                                    onTitleClick = { onNavigateToEpisode(item.episode.feed_id, item.episode.id) },
                                     onPlayClick = { onPlayEpisode(item.episode.id) }
                                 )
                             }
@@ -234,7 +242,7 @@ fun DashboardScreen(
                                     episode = item.episode,
                                     feedTitle = item.feed?.title ?: "",
                                     sub = item.episode.local_size_bytes?.let { formatBytes(it) } ?: "",
-                                    onTitleClick = { onNavigateToFeed(item.episode.feed_id) },
+                                    onTitleClick = { onNavigateToEpisode(item.episode.feed_id, item.episode.id) },
                                     onPlayClick = { onPlayEpisode(item.episode.id) }
                                 )
                             }
@@ -293,7 +301,7 @@ fun DashboardScreen(
                                         episode = item.episode,
                                         feedTitle = item.feed?.title ?: "",
                                         sub = item.episode.duration?.let { formatDuration(it) } ?: "",
-                                        onTitleClick = { onNavigateToFeed(item.episode.feed_id) },
+                                        onTitleClick = { onNavigateToEpisode(item.episode.feed_id, item.episode.id) },
                                         onPlayClick = { onPlayEpisode(item.episode.id) }
                                     )
                                 }

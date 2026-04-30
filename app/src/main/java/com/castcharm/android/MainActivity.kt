@@ -69,10 +69,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -94,11 +96,14 @@ import com.castcharm.android.ui.player.PlayerScreen
 import com.castcharm.android.ui.settings.SettingsScreen
 import com.castcharm.android.ui.settings.SettingsViewModel
 import com.castcharm.android.ui.theme.CastCharmTheme
+import com.castcharm.android.ui.search.SearchScreen
 import com.castcharm.android.ui.shared_components.ReconnectOutlinedButton
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodes
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesFromDashboard
+import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesHighlighted
 import com.castcharm.android.ui.shared_components.navigateToFeedsRootFromNested
 import com.castcharm.android.ui.shared_components.navigateToPlayer
+import com.castcharm.android.ui.shared_components.navigateToSearch
 import com.castcharm.android.ui.shared_components.navigateToTopLevel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -564,7 +569,7 @@ fun MainScaffold(
     // Bottom nav is shown on all main tabs and the episode list screen (nested
     // under Feeds). It is hidden on the full-screen player route.
     val showBottomBar =
-        currentRoute in listOf("dashboard", "feeds", "downloads", "settings") ||
+        currentRoute in listOf("dashboard", "feeds", "downloads", "settings", "search") ||
                 currentRoute?.startsWith("episodes/") == true
 
     val isOnPlayerRoute = currentRoute == "player"
@@ -612,6 +617,10 @@ fun MainScaffold(
                             onNavigateToFeed = { feedId ->
                                 navController.navigateToFeedEpisodesFromDashboard(feedId)
                             },
+                            onNavigateToEpisode = { feedId, episodeId ->
+                                navController.navigateToTopLevel("feeds")
+                                navController.navigateToFeedEpisodesHighlighted(feedId, episodeId)
+                            },
                             onPlayEpisode = { episodeId ->
                                 playerController.playEpisode(episodeId)
                                 navController.navigateToPlayer()
@@ -622,6 +631,9 @@ fun MainScaffold(
                             onNavigateToDownloads = {
                                 navController.navigateToTopLevel("downloads")
                             },
+                            onSearchClick = if (!isOfflineMode) {
+                                { navController.navigateToSearch() }
+                            } else null,
                             isOfflineMode = isOfflineMode,
                             isReconnectInFlight = isReconnectInFlight,
                             onRetryConnection = onReconnectRequest
@@ -646,6 +658,9 @@ fun MainScaffold(
                             onNavigateToEpisodes = { feedId ->
                                 navController.navigateToFeedEpisodes(feedId)
                             },
+                            onSearchClick = if (!isOfflineMode) {
+                                { navController.navigateToSearch() }
+                            } else null,
                             isOfflineMode = isOfflineMode,
                             isReconnectInFlight = isReconnectInFlight,
                             onRetryConnection = onReconnectRequest,
@@ -706,8 +721,23 @@ fun MainScaffold(
                     // The feedId is extracted from the route path argument and used
                     // as the ViewModel key so each feed gets its own ViewModel instance
                     // in the ViewModelStore (preventing state bleed between feeds).
-                    composable("episodes/{feedId}") { backStackEntry ->
+                    // The optional ?highlight={episodeId} query param is set when
+                    // navigating from search results so EpisodeListScreen can scroll
+                    // to and auto-expand that specific episode.
+                    composable(
+                        "episodes/{feedId}?highlight={highlight}",
+                        arguments = listOf(
+                            navArgument("feedId") { type = NavType.StringType },
+                            navArgument("highlight") {
+                                type = NavType.IntType
+                                defaultValue = -1
+                            }
+                        )
+                    ) { backStackEntry ->
                         val feedId = backStackEntry.arguments?.getString("feedId")?.toIntOrNull() ?: 0
+                        val highlight = backStackEntry.arguments?.getInt("highlight").let {
+                            if (it == null || it == -1) null else it
+                        }
                         val vm = viewModel<EpisodeListViewModel>(key = "episodes_$feedId") {
                             EpisodeListViewModel(feedId)
                         }
@@ -725,6 +755,7 @@ fun MainScaffold(
                         EpisodeListScreen(
                             feedId = feedId,
                             viewModel = vm,
+                            highlightEpisodeId = highlight,
                             onPlayEpisode = { episodeId ->
                                 playerController.playEpisode(episodeId)
                                 navController.navigateToPlayer()
@@ -738,6 +769,15 @@ fun MainScaffold(
                             onNavigateToDownloads = {
                                 navController.navigateToTopLevel("downloads")
                             }
+                        )
+                    }
+
+                    composable("search") {
+                        SearchScreen(
+                            onNavigateToEpisode = { feedId, episodeId ->
+                                navController.navigateToFeedEpisodesHighlighted(feedId, episodeId)
+                            },
+                            onNavigateBack = { navController.popBackStack() }
                         )
                     }
 
