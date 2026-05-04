@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Podcasts
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -89,6 +90,10 @@ import com.castcharm.android.ui.dashboard.DashboardViewModel
 import com.castcharm.android.ui.downloads.DownloadsScreen
 import com.castcharm.android.ui.episodes.EpisodeListScreen
 import com.castcharm.android.ui.episodes.EpisodeListViewModel
+import com.castcharm.android.ui.playlists.PlaylistDetailScreen
+import com.castcharm.android.ui.playlists.PlaylistDetailViewModel
+import com.castcharm.android.ui.playlists.PlaylistsScreen
+import com.castcharm.android.ui.playlists.PlaylistsViewModel
 import com.castcharm.android.ui.feeds.FeedListScreen
 import com.castcharm.android.ui.feeds.FeedListViewModel
 import com.castcharm.android.ui.login.LoginScreen
@@ -102,6 +107,7 @@ import com.castcharm.android.ui.shared_components.navigateToFeedEpisodes
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesFromDashboard
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesHighlighted
 import com.castcharm.android.ui.shared_components.navigateToFeedsRootFromNested
+import com.castcharm.android.ui.shared_components.navigateToPlaylistDetail
 import com.castcharm.android.ui.shared_components.navigateToPlayer
 import com.castcharm.android.ui.shared_components.navigateToSearch
 import com.castcharm.android.ui.shared_components.navigateToTopLevel
@@ -145,6 +151,13 @@ sealed class Screen(val route: String, val label: String) {
         }
     }
 
+    data object Playlists : Screen("playlists", "Playlists") {
+        @Composable
+        override fun Icon(isDownloading: Boolean) {
+            Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Playlists")
+        }
+    }
+
     data object Settings : Screen("settings", "Settings") {
         @Composable
         override fun Icon(isDownloading: Boolean) {
@@ -158,6 +171,7 @@ val bottomNavItems = listOf(
     Screen.Dashboard,
     Screen.Feeds,
     Screen.Downloads,
+    Screen.Playlists,
     Screen.Settings
 )
 
@@ -569,8 +583,9 @@ fun MainScaffold(
     // Bottom nav is shown on all main tabs and the episode list screen (nested
     // under Feeds). It is hidden on the full-screen player route.
     val showBottomBar =
-        currentRoute in listOf("dashboard", "feeds", "downloads", "settings", "search") ||
-                currentRoute?.startsWith("episodes/") == true
+        currentRoute in listOf("dashboard", "feeds", "downloads", "playlists", "settings", "search") ||
+                currentRoute?.startsWith("episodes/") == true ||
+                currentRoute?.startsWith("playlists/") == true
 
     val isOnPlayerRoute = currentRoute == "player"
 
@@ -772,6 +787,67 @@ fun MainScaffold(
                         )
                     }
 
+                    composable("playlists") { backStackEntry ->
+                        val playlistsVm: PlaylistsViewModel = viewModel()
+
+                        DisposableEffect(backStackEntry.lifecycle) {
+                            val observer = LifecycleEventObserver { _, event ->
+                                if (event == Lifecycle.Event.ON_RESUME) {
+                                    playlistsVm.loadPlaylists()
+                                }
+                            }
+                            backStackEntry.lifecycle.addObserver(observer)
+                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        }
+
+                        PlaylistsScreen(
+                            viewModel = playlistsVm,
+                            onViewPlaylist = { playlistId ->
+                                navController.navigateToPlaylistDetail(playlistId)
+                            },
+                            onPlayPlaylist = { playlistId ->
+                                navController.navigateToPlaylistDetail(playlistId)
+                            },
+                            onEpisodeReady = { episodeId ->
+                                playerController.playEpisode(episodeId)
+                                navController.navigateToPlayer()
+                            }
+                        )
+                    }
+
+                    composable(
+                        "playlists/{playlistId}",
+                        arguments = listOf(
+                            navArgument("playlistId") { type = NavType.StringType }
+                        )
+                    ) { backStackEntry ->
+                        val playlistId = backStackEntry.arguments?.getString("playlistId")?.toIntOrNull() ?: 0
+                        val vm = viewModel<PlaylistDetailViewModel>(key = "playlist_$playlistId") {
+                            PlaylistDetailViewModel(playlistId)
+                        }
+
+                        DisposableEffect(backStackEntry.lifecycle) {
+                            val observer = LifecycleEventObserver { _, event ->
+                                if (event == Lifecycle.Event.ON_RESUME) {
+                                    vm.loadPlaylist()
+                                }
+                            }
+                            backStackEntry.lifecycle.addObserver(observer)
+                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        }
+
+                        PlaylistDetailScreen(
+                            playlistId = playlistId,
+                            viewModel = vm,
+                            onPlayEpisode = { episodeId ->
+                                playerController.playEpisode(episodeId)
+                                navController.navigateToPlayer()
+                            },
+                            onNavigateBack = { navController.popBackStack() },
+                            isOfflineMode = isOfflineMode
+                        )
+                    }
+
                     composable("search") {
                         SearchScreen(
                             onNavigateToEpisode = { feedId, episodeId ->
@@ -841,7 +917,8 @@ fun MainScaffold(
                                 navBackStackEntry?.destination?.hierarchy?.any {
                                     it.route == screen.route
                                 } == true ||
-                                        (screen is Screen.Feeds && currentRoute?.startsWith("episodes/") == true)
+                                        (screen is Screen.Feeds && currentRoute?.startsWith("episodes/") == true) ||
+                                        (screen is Screen.Playlists && currentRoute?.startsWith("playlists/") == true)
 
                             NavigationBarItem(
                                 icon = {
@@ -867,6 +944,10 @@ fun MainScaffold(
 
                                         is Screen.Downloads -> {
                                             navController.navigateToTopLevel(Screen.Downloads.route)
+                                        }
+
+                                        is Screen.Playlists -> {
+                                            navController.navigateToTopLevel(Screen.Playlists.route)
                                         }
 
                                         is Screen.Settings -> {

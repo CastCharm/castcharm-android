@@ -71,6 +71,7 @@ class PlayerViewModel : ViewModel() {
             }
         }
 
+        registerAutoAdvance()
         observeSharedPlaybackState()
         startProgressTracking()
     }
@@ -162,6 +163,23 @@ class PlayerViewModel : ViewModel() {
                     System.currentTimeMillis(),
                     pending = true
                 )
+            }
+        }
+    }
+
+    private fun registerAutoAdvance() {
+        playerController.setOnCompletion {
+            viewModelScope.launch {
+                if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return@launch
+                try {
+                    val state = CastCharmApp.apiClient.getApi().playerNext()
+                    val next = state.current_episode
+                    if (next != null && next.status == "downloaded") {
+                        playerController.playEpisode(next.id)
+                    }
+                } catch (_: Exception) {
+                    // No server context active or end of queue — do nothing
+                }
             }
         }
     }

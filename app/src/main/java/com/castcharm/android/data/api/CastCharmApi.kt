@@ -155,4 +155,45 @@ interface CastCharmApi {
     // response shape includes computed aggregates that vary between versions.
     @GET("api/stats")
     suspend fun getStats(): Map<String, Any?>
+
+    // ---- Playlists ----------------------------------------------------------
+    @GET("api/playlists")
+    suspend fun getPlaylists(): List<PlaylistOut>
+
+    @POST("api/playlists")
+    suspend fun createPlaylist(@Body body: CreatePlaylistRequest): PlaylistOut
+
+    @PUT("api/playlists/{id}")
+    suspend fun updatePlaylist(@Path("id") id: Int, @Body body: UpdatePlaylistRequest): PlaylistOut
+
+    @DELETE("api/playlists/{id}")
+    suspend fun deletePlaylist(@Path("id") id: Int)
+
+    @GET("api/playlists/{id}/episodes")
+    suspend fun getPlaylistEpisodes(@Path("id") id: Int): List<EpisodeOut>
+
+    @POST("api/playlists/{id}/episodes")
+    suspend fun addToPlaylist(@Path("id") id: Int, @Body body: AddToPlaylistRequest)
+
+    @DELETE("api/playlists/{id}/episodes/{episode_id}")
+    suspend fun removeFromPlaylist(@Path("id") id: Int, @Path("episode_id") episodeId: Int)
+
+    @PUT("api/playlists/{id}/episodes/reorder")
+    suspend fun reorderPlaylist(@Path("id") id: Int, @Body body: ReorderRequest)
+
+    @GET("api/playlists/episode-memberships")
+    suspend fun getEpisodePlaylists(@Query("episode_id") episodeId: Int): List<PlaylistOut>
+
+    @GET("api/playlists/feed-memberships")
+    suspend fun getFeedPlaylistMemberships(@Query("feed_id") feedId: Int): FeedPlaylistMemberships
+
+    // ---- Player context -----------------------------------------------------
+    @POST("api/player/play")
+    suspend fun playerPlay(@Body body: PlayerPlayRequest): PlayerStateOut
+
+    @POST("api/player/next")
+    suspend fun playerNext(): PlayerStateOut
+
+    @POST("api/player/prev")
+    suspend fun playerPrev(): PlayerStateOut
 }

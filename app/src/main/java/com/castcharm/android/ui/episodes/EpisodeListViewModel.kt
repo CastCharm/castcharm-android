@@ -19,6 +19,7 @@ import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.data.db.entities.FeedEntity
 import com.castcharm.android.data.repository.EpisodeRepository
 import com.castcharm.android.data.repository.FeedRepository
+import com.castcharm.android.data.api.models.PlayerPlayRequest
 import com.castcharm.android.download.DownloadScheduler
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,7 +38,8 @@ data class EpisodeListUiState(
     val isSyncing: Boolean = false,
     val errorMessage: String? = null,
     val hasMore: Boolean = false,
-    val selectedEpisodes: Set<Int> = emptySet()
+    val selectedEpisodes: Set<Int> = emptySet(),
+    val playlistMemberEpisodeIds: Set<Int> = emptySet()
 )
 
 class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
@@ -119,6 +121,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         }
 
         refreshEpisodes()
+        refreshPlaylistMemberships()
     }
 
     fun clearError() {
@@ -375,6 +378,48 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                 _uiState.update {
                     it.copy(errorMessage = "Failed to update: ${e.message}")
                 }
+            }
+        }
+    }
+
+    fun refreshPlaylistMemberships() {
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return
+        viewModelScope.launch {
+            try {
+                val result = CastCharmApp.apiClient.getApi().getFeedPlaylistMemberships(feedId)
+                _uiState.update { it.copy(playlistMemberEpisodeIds = result.episode_ids.toSet()) }
+            } catch (_: Exception) {
+                // Non-critical — playlist membership badge is best-effort
+            }
+        }
+    }
+
+    fun onPlaylistMembershipChanged(episodeId: Int, isInPlaylist: Boolean) {
+        _uiState.update { state ->
+            val updated = if (isInPlaylist) {
+                state.playlistMemberEpisodeIds + episodeId
+            } else {
+                state.playlistMemberEpisodeIds - episodeId
+            }
+            state.copy(playlistMemberEpisodeIds = updated)
+        }
+    }
+
+    fun playFeed(onEpisodeIdReady: (Int) -> Unit) {
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return
+        viewModelScope.launch {
+            try {
+                val state = CastCharmApp.apiClient.getApi().playerPlay(
+                    PlayerPlayRequest(context_type = "feed", context_id = feedId, context_filter = "unplayed")
+                )
+                val episodeId = state.current_episode?.id
+                if (episodeId != null) {
+                    onEpisodeIdReady(episodeId)
+                } else {
+                    _uiState.update { it.copy(errorMessage = "No unplayed downloaded episodes to play") }
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "Failed to play feed: ${e.localizedMessage}") }
             }
         }
     }

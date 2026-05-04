@@ -39,9 +39,11 @@ import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -77,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.ui.playlists.AddToPlaylistSheet
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
 import com.castcharm.android.ui.shared_components.EpisodeCard
@@ -110,6 +113,7 @@ fun EpisodeListScreen(
     // Auto-expand the highlighted episode (navigated from search).
     var expandedEpisodeId by remember { mutableStateOf<Int?>(highlightEpisodeId) }
     val listState = rememberLazyListState()
+    var addToPlaylistSheetEpisodeId by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(highlightEpisodeId) {
         if (highlightEpisodeId == null) return@LaunchedEffect
@@ -305,7 +309,10 @@ fun EpisodeListScreen(
                                 imageUrl = feed.custom_image_url ?: feed.image_url
                                 ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${feed.id}/cover.jpg" else null,
                                 episodeCount = feed.episode_count,
-                                unplayedCount = feed.unplayed_count
+                                unplayedCount = feed.unplayed_count,
+                                onPlayFeed = if (!isOfflineMode && feed.unplayed_count > 0) {
+                                    { viewModel.playFeed { episodeId -> onPlayEpisode(episodeId) } }
+                                } else null
                             )
                         }
                     }
@@ -340,7 +347,11 @@ fun EpisodeListScreen(
                                 episode.local_path != null -> EpisodeDownloadActionOverride.ON_PHONE
                                 isPhoneDownloadInProgress -> EpisodeDownloadActionOverride.PHONE_IN_PROGRESS
                                 else -> null
-                            }
+                            },
+                            onAddToPlaylist = if (!isOfflineMode) {
+                                { addToPlaylistSheetEpisodeId = episode.id }
+                            } else null,
+                            isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds
                         )
                     }
 
@@ -369,6 +380,18 @@ fun EpisodeListScreen(
                 }
             }
         }
+    }
+
+    addToPlaylistSheetEpisodeId?.let { epId ->
+        val ep = uiState.episodes.find { it.id == epId }
+        AddToPlaylistSheet(
+            episodeId = epId,
+            episodeTitle = ep?.title ?: "",
+            onDismiss = { addToPlaylistSheetEpisodeId = null },
+            onMembershipChanged = { changedEpisodeId, isInPlaylist ->
+                viewModel.onPlaylistMembershipChanged(changedEpisodeId, isInPlaylist)
+            }
+        )
     }
 }
 
@@ -406,7 +429,8 @@ fun FeedHeader(
     feedDescription: String?,
     imageUrl: String?,
     episodeCount: Int,
-    unplayedCount: Int
+    unplayedCount: Int,
+    onPlayFeed: (() -> Unit)? = null
 ) {
     var descriptionExpanded by remember { mutableStateOf(false) }
 
@@ -427,7 +451,10 @@ fun FeedHeader(
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
                         text = "$episodeCount episodes",
                         style = MaterialTheme.typography.bodySmall,
@@ -435,6 +462,18 @@ fun FeedHeader(
                     )
                     if (unplayedCount > 0) {
                         Badge { Text("$unplayedCount unplayed") }
+                    }
+                }
+                if (onPlayFeed != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = onPlayFeed,
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Play Feed", style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 if (feedDescription != null) {

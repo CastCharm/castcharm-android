@@ -67,3 +67,9 @@ fun NavHostController.navigateToFeedEpisodesFromDashboard(feedId: Int) {
 fun NavHostController.navigateToFeedsRootFromNested(currentRoute: String?) {
     navigateToTopLevel("feeds")
 }
+
+fun NavHostController.navigateToPlaylistDetail(playlistId: Int) {
+    navigate("playlists/$playlistId") {
+        launchSingleTop = true
+    }
+}

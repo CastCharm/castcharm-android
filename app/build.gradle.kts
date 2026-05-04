@@ -12,8 +12,8 @@ android {
         applicationId = "com.castcharm.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.1.1"
+        versionCode = 8
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -120,6 +120,9 @@ dependencies {
 
     // Guava (for Futures)
     implementation("com.google.guava:guava:32.1.3-android")
+
+    // Drag-to-reorder for LazyColumn (used in PlaylistDetailScreen)
+    implementation("sh.calvin.reorderable:reorderable:2.4.0")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

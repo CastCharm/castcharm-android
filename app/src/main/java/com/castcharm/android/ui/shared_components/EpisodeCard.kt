@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhonelinkRing
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.Badge
@@ -107,7 +109,9 @@ fun EpisodeCard(
     onDownloadToServer: () -> Unit,
     onDownloadToDevice: () -> Unit,
     onDeleteFromPhone: (() -> Unit)? = null,
-    downloadActionOverride: EpisodeDownloadActionOverride? = null
+    downloadActionOverride: EpisodeDownloadActionOverride? = null,
+    onAddToPlaylist: (() -> Unit)? = null,
+    isInPlaylist: Boolean = false
 ) {
     // Resolve artwork URL through a four-level fallback chain:
     // 1. Episode-specific custom image (set by the user or override)
@@ -452,6 +456,14 @@ fun EpisodeCard(
                             }
                         }
 
+                        if (onAddToPlaylist != null) {
+                            EpisodeActionButton(
+                                icon = if (isInPlaylist) Icons.AutoMirrored.Filled.PlaylistAddCheck else Icons.AutoMirrored.Filled.PlaylistAdd,
+                                label = if (isInPlaylist) "In Playlist" else "Add to List",
+                                tint = if (isInPlaylist) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = onAddToPlaylist
+                            )
+                        }
                     }
 
                     // Episode description section — only rendered when description exists.
