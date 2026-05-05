@@ -111,7 +111,8 @@ fun EpisodeCard(
     onDeleteFromPhone: (() -> Unit)? = null,
     downloadActionOverride: EpisodeDownloadActionOverride? = null,
     onAddToPlaylist: (() -> Unit)? = null,
-    isInPlaylist: Boolean = false
+    isInPlaylist: Boolean = false,
+    enablePlaylists: Boolean = true
 ) {
     // Resolve artwork URL through a four-level fallback chain:
     // 1. Episode-specific custom image (set by the user or override)
@@ -456,7 +457,7 @@ fun EpisodeCard(
                             }
                         }
 
-                        if (onAddToPlaylist != null) {
+                        if (onAddToPlaylist != null && enablePlaylists) {
                             EpisodeActionButton(
                                 icon = if (isInPlaylist) Icons.AutoMirrored.Filled.PlaylistAddCheck else Icons.AutoMirrored.Filled.PlaylistAdd,
                                 label = if (isInPlaylist) "In Playlist" else "Add to List",

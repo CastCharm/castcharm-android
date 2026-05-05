@@ -100,7 +100,8 @@ fun EpisodeListScreen(
     isOfflineMode: Boolean = false,
     isReconnectInFlight: Boolean = false,
     onRetryConnection: (() -> Unit)? = null,
-    onNavigateToDownloads: (() -> Unit)? = null
+    onNavigateToDownloads: (() -> Unit)? = null,
+    enablePlaylists: Boolean = false
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val feed = uiState.feed
@@ -351,7 +352,8 @@ fun EpisodeListScreen(
                             onAddToPlaylist = if (!isOfflineMode) {
                                 { addToPlaylistSheetEpisodeId = episode.id }
                             } else null,
-                            isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds
+                            isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds,
+                            enablePlaylists = enablePlaylists
                         )
                     }
 

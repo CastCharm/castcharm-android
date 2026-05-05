@@ -64,6 +64,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.Lifecycle
@@ -98,6 +99,7 @@ import com.castcharm.android.ui.feeds.FeedListScreen
 import com.castcharm.android.ui.feeds.FeedListViewModel
 import com.castcharm.android.ui.login.LoginScreen
 import com.castcharm.android.ui.player.PlayerScreen
+import com.castcharm.android.ui.settings.ENABLE_PLAYLISTS_KEY
 import com.castcharm.android.ui.settings.SettingsScreen
 import com.castcharm.android.ui.settings.SettingsViewModel
 import com.castcharm.android.ui.theme.CastCharmTheme
@@ -554,6 +556,11 @@ fun MainScaffold(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
+    val dataStore = CastCharmApp.instance.dataStore
+    val enablePlaylists by remember(dataStore) {
+        dataStore.data.map { it[ENABLE_PLAYLISTS_KEY] ?: false }
+    }.collectAsState(initial = false)
+
     val playerController = CastCharmApp.playerController
     val playbackUiState by playerController.playbackState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -582,10 +589,11 @@ fun MainScaffold(
 
     // Bottom nav is shown on all main tabs and the episode list screen (nested
     // under Feeds). It is hidden on the full-screen player route.
+    val playlistRoutes = if (enablePlaylists) listOf("playlists") else emptyList()
     val showBottomBar =
-        currentRoute in listOf("dashboard", "feeds", "downloads", "playlists", "settings", "search") ||
+        currentRoute in (listOf("dashboard", "feeds", "downloads", "settings", "search") + playlistRoutes) ||
                 currentRoute?.startsWith("episodes/") == true ||
-                currentRoute?.startsWith("playlists/") == true
+                (enablePlaylists && currentRoute?.startsWith("playlists/") == true)
 
     val isOnPlayerRoute = currentRoute == "player"
 
@@ -783,7 +791,8 @@ fun MainScaffold(
                             onRetryConnection = onReconnectRequest,
                             onNavigateToDownloads = {
                                 navController.navigateToTopLevel("downloads")
-                            }
+                            },
+                            enablePlaylists = enablePlaylists
                         )
                     }
 
@@ -844,7 +853,8 @@ fun MainScaffold(
                                 navController.navigateToPlayer()
                             },
                             onNavigateBack = { navController.popBackStack() },
-                            isOfflineMode = isOfflineMode
+                            isOfflineMode = isOfflineMode,
+                            enablePlaylists = enablePlaylists
                         )
                     }
 
@@ -907,7 +917,9 @@ fun MainScaffold(
                     }
 
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                        bottomNavItems.forEach { screen ->
+                        bottomNavItems.filter { screen ->
+                            screen !is Screen.Playlists || enablePlaylists
+                        }.forEach { screen ->
                             // Determine if this tab is "selected" by checking whether any
                             // destination in the back stack hierarchy matches the route.
                             // The Feeds tab is also selected when the episode list (a child

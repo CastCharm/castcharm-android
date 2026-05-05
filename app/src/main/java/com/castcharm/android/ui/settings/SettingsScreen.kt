@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.lifecycle.ViewModel
@@ -60,6 +61,8 @@ import com.castcharm.android.ui.shared_components.OfflineModePanel
 
 val MAX_CONCURRENT_DOWNLOADS_KEY = intPreferencesKey("max_concurrent_downloads")
 private const val DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
+val ENABLE_PLAYLISTS_KEY = booleanPreferencesKey("enable_playlists")
+private const val DEFAULT_ENABLE_PLAYLISTS = false
 
 data class SettingsUiState(
     val quotaGb: Long = 5,
@@ -71,7 +74,8 @@ data class SettingsUiState(
     val themeMode: String = "system",
     val fontScale: Float = 1.0f,
     val maxConcurrentDownloads: Int = DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-    val isClearing: Boolean = false
+    val isClearing: Boolean = false,
+    val enablePlaylists: Boolean = DEFAULT_ENABLE_PLAYLISTS
 )
 
 class SettingsViewModel(private val storageManager: StorageManager) : ViewModel() {
@@ -104,6 +108,9 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
             val maxConcurrentDownloads = CastCharmApp.instance.dataStore.data
                 .map { it[MAX_CONCURRENT_DOWNLOADS_KEY] ?: DEFAULT_MAX_CONCURRENT_DOWNLOADS }
                 .first()
+            val enablePlaylists = CastCharmApp.instance.dataStore.data
+                .map { it[ENABLE_PLAYLISTS_KEY] ?: DEFAULT_ENABLE_PLAYLISTS }
+                .first()
 
             val externalDir = CastCharmApp.instance.getExternalFilesDir(null) ?: CastCharmApp.instance.filesDir
             val totalSpace = externalDir.totalSpace
@@ -124,7 +131,8 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
                 serverVersion = serverVersion,
                 themeMode = themeMode,
                 fontScale = fontScale,
-                maxConcurrentDownloads = maxConcurrentDownloads
+                maxConcurrentDownloads = maxConcurrentDownloads,
+                enablePlaylists = enablePlaylists
             )
         }
     }
@@ -164,6 +172,13 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
         viewModelScope.launch {
             CastCharmApp.instance.dataStore.edit { it[THEME_KEY] = mode }
             _uiState.value = _uiState.value.copy(themeMode = mode)
+        }
+    }
+
+    fun setEnablePlaylists(enabled: Boolean) {
+        viewModelScope.launch {
+            CastCharmApp.instance.dataStore.edit { it[ENABLE_PLAYLISTS_KEY] = enabled }
+            _uiState.value = _uiState.value.copy(enablePlaylists = enabled)
         }
     }
 
@@ -295,6 +310,51 @@ fun SettingsScreen(
                             Icon(Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("Change Server")
+                        }
+                    }
+                }
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Features", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text("Playlists", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    "Create and manage custom playlists",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = uiState.enablePlaylists,
+                                onCheckedChange = { viewModel.setEnablePlaylists(it) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = MaterialTheme.colorScheme.primary,
+                                    checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                                    uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            )
                         }
                     }
                 }

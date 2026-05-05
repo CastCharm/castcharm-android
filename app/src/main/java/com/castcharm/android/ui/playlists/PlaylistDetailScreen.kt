@@ -53,7 +53,8 @@ fun PlaylistDetailScreen(
     viewModel: PlaylistDetailViewModel,
     onPlayEpisode: (episodeId: Int) -> Unit,
     onNavigateBack: () -> Unit,
-    isOfflineMode: Boolean = false
+    isOfflineMode: Boolean = false,
+    enablePlaylists: Boolean = false
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -188,7 +189,8 @@ fun PlaylistDetailScreen(
                                             onAddToPlaylist = if (!isOfflineMode) {
                                                 { addToPlaylistSheetEpisodeId = episode.id }
                                             } else null,
-                                            isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds
+                                            isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds,
+                                            enablePlaylists = enablePlaylists
                                         )
                                     }
                                 }
@@ -213,7 +215,8 @@ fun PlaylistDetailScreen(
                                 onAddToPlaylist = if (!isOfflineMode) {
                                     { addToPlaylistSheetEpisodeId = episode.id }
                                 } else null,
-                                isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds
+                                isInPlaylist = episode.id in uiState.playlistMemberEpisodeIds,
+                                enablePlaylists = enablePlaylists
                             )
                         }
                     }
