@@ -19,6 +19,8 @@ The Android app currently includes:
 - Android Auto media browsing and playback controls
 - Jetpack Compose UI
 - App settings, including storage/offline-related controls
+- Custom and feed-based playlists with drag-to-reorder support (feature toggleable in settings)
+- Auto-advance playback when queue context is active
 
 ## Repository layout
 
@@ -132,6 +134,19 @@ The app currently depends on these CastCharm server endpoints:
 | `POST /api/episodes/{id}/played` | Toggle played state |
 | `GET /api/episodes/continue-listening` | Fetch resumable episodes |
 | `GET /api/feeds/{id}/cover.jpg` | Fetch feed artwork |
+| `GET /api/playlists` | Fetch all playlists |
+| `POST /api/playlists` | Create a new playlist |
+| `PUT /api/playlists/{id}` | Update playlist metadata |
+| `DELETE /api/playlists/{id}` | Delete a playlist |
+| `GET /api/playlists/{id}/episodes` | Fetch episodes in a playlist |
+| `POST /api/playlists/{id}/episodes` | Add episode to playlist |
+| `DELETE /api/playlists/{id}/episodes/{episode_id}` | Remove episode from playlist |
+| `PUT /api/playlists/{id}/episodes/reorder` | Reorder episodes in playlist |
+| `GET /api/playlists/episode-memberships` | Get all playlists containing an episode |
+| `GET /api/playlists/feed-memberships` | Get playlist memberships for episodes in a feed |
+| `POST /api/player/play` | Start playback with context (feed or playlist) |
+| `POST /api/player/next` | Skip to next episode in queue |
+| `POST /api/player/prev` | Go to previous episode in queue |
 
 If server endpoint behavior changes, update the Retrofit interface, repositories, playback/download paths, and any related tests or manual QA notes together.
 
@@ -151,3 +166,4 @@ If server endpoint behavior changes, update the Retrofit interface, repositories
 - Coil
 - Kotlin coroutines
 - Guava futures
+- Reorderable (drag-to-reorder list support)
