@@ -12,6 +12,7 @@ package com.castcharm.android.data.api
 // it is safe to call on every screen navigation without rebuilding the HTTP stack.
 
 import android.content.Context
+import com.castcharm.android.BuildConfig
 import com.castcharm.android.CastCharmApp
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
@@ -59,22 +60,26 @@ class ApiClient(private val context: Context) {
         baseUrl = normalizedBaseUrl
         cookieJar = PersistentCookieJar(context)
 
-        // Log headers only (not body) so auth tokens appear in Logcat for debugging
-        // without logging potentially large response bodies in production builds.
-        val logging = HttpLoggingInterceptor().apply {
-            setLevel(HttpLoggingInterceptor.Level.HEADERS)
-        }
-
         // SessionStateInterceptor is added first so it sees both request and response
-        // before the logging interceptor writes to Logcat.
-        httpClient = OkHttpClient.Builder()
+        // before any other interceptor logs. ApiKeyInterceptor attaches the stored
+        // API key, and is a no-op until this device has enrolled one.
+        //
+        // HttpLoggingInterceptor at HEADERS level echoes the X-API-Key header, so
+        // it is only wired in for debug builds. A release APK never emits the key
+        // to Logcat.
+        val builder = OkHttpClient.Builder()
             .cookieJar(cookieJar!!)
             .addInterceptor(SessionStateInterceptor())
-            .addInterceptor(logging)
+            .addInterceptor(ApiKeyInterceptor(context))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
-            .build()
+        if (BuildConfig.DEBUG) {
+            builder.addInterceptor(HttpLoggingInterceptor().apply {
+                setLevel(HttpLoggingInterceptor.Level.HEADERS)
+            })
+        }
+        httpClient = builder.build()
 
         // KotlinJsonAdapterFactory enables Moshi to serialize/deserialize Kotlin data
         // classes with default parameter values and nullability correctly.
@@ -107,7 +112,7 @@ class ApiClient(private val context: Context) {
 // Every HTTP response or failure passes through this interceptor, which delegates
 // to AppSessionManager to update connectivity/auth state:
 //   - successful response  → reset transient failure counter (server is reachable)
-//   - 401 / 403            → report auth invalid (session expired or credentials changed)
+//   - 401                  → report auth invalid (session expired or key revoked)
 //   - connectivity failure → contribute to the 3-in-8s unreachable streak
 //
 // Cancellations are excluded from the unreachable streak because they are caused
@@ -123,7 +128,14 @@ private class SessionStateInterceptor : Interceptor {
 
             // Session was rejected server-side. Report before returning the response
             // so AppSessionManager can immediately transition to NotLoggedIn.
-            if (response.code == 401 || response.code == 403) {
+            //
+            // 401 ONLY — deliberately not 403. The server returns 401 for every
+            // authentication failure (see AuthMiddleware) and reserves 403 for policy
+            // refusals that have nothing to do with the session: an episode whose file
+            // sits outside the managed download directory, a disabled external API, a
+            // directory listing that is off-limits. Treating those as an expired
+            // session logged the user out at random and forced a manual re-login.
+            if (response.code == 401) {
                 CastCharmApp.reportAuthInvalid()
             }
 
@@ -178,13 +190,22 @@ private class SessionStateInterceptor : Interceptor {
 // so session tokens survive app restarts. Expired cookies are filtered out both
 // on load (so stale tokens are never sent) and on request (so tokens that expire
 // while the app is running are lazily evicted and the file is updated).
+//
+// Concurrency: DownloadWorker and PodcastArtworkProvider each construct their
+// own PersistentCookieJar pointing at the same file. Every read/write is
+// synchronized on `lock` and every persist goes through a write-to-temp + atomic
+// rename so an interleaved save from a sibling instance can't produce a
+// half-written or truncated cookies.json.
 class PersistentCookieJar(private val context: Context) : CookieJar {
     private val cookieFile = File(context.filesDir, "cookies.json")
+    private val tmpFile = File(context.filesDir, "cookies.json.tmp")
     // In-memory map of hostname → cookie list for fast per-request lookup.
     private val cookies = mutableMapOf<String, MutableList<Cookie>>()
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val listType = Types.newParameterizedType(List::class.java, SerializedCookie::class.java)
     private val adapter = moshi.adapter<List<SerializedCookie>>(listType)
+    // Guards the in-memory map and every disk operation.
+    private val lock = Any()
 
     init {
         // Load persisted cookies from disk immediately so the first request after
@@ -196,8 +217,10 @@ class PersistentCookieJar(private val context: Context) : CookieJar {
     // cookies for the host and immediately persists to disk.
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         val host = url.host
-        this.cookies[host] = cookies.toMutableList()
-        saveCookies()
+        synchronized(lock) {
+            this.cookies[host] = cookies.toMutableList()
+            saveCookies()
+        }
     }
 
     // Called by OkHttp before each request. Returns only non-expired cookies.
@@ -205,21 +228,23 @@ class PersistentCookieJar(private val context: Context) : CookieJar {
     // the on-disk file are both updated to evict them.
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
         val host = url.host
-        val hostCookies = cookies[host] ?: return emptyList()
-
-        val now = System.currentTimeMillis()
-        val validCookies = hostCookies.filter { it.expiresAt > now }
-
-        if (validCookies.size != hostCookies.size) {
-            cookies[host] = validCookies.toMutableList()
-            saveCookies()
+        return synchronized(lock) {
+            val hostCookies = cookies[host] ?: return@synchronized emptyList()
+            val now = System.currentTimeMillis()
+            val validCookies = hostCookies.filter { it.expiresAt > now }
+            if (validCookies.size != hostCookies.size) {
+                cookies[host] = validCookies.toMutableList()
+                saveCookies()
+            }
+            validCookies
         }
-
-        return validCookies
     }
 
-    // Serializes the full cookie map to JSON and overwrites the file.
-    // Exception is caught and printed rather than propagated — a failed write
+    // Serializes the full cookie map to JSON and overwrites the file via
+    // temp-file + rename so a reader (or a concurrent writer) never observes
+    // a partially written cookies.json. Caller must hold `lock`.
+    //
+    // Exception is caught and logged rather than propagated — a failed write
     // means the next app launch will need a fresh login, which is acceptable.
     private fun saveCookies() {
         try {
@@ -229,7 +254,15 @@ class PersistentCookieJar(private val context: Context) : CookieJar {
                     allCookies.add(SerializedCookie.from(cookie, host))
                 }
             }
-            cookieFile.writeText(adapter.toJson(allCookies))
+            val json = adapter.toJson(allCookies)
+            tmpFile.writeText(json)
+            // renameTo is atomic on POSIX filesystems, which is what Android
+            // uses for internal storage. If the rename fails (unlikely), fall
+            // back to a plain overwrite so we still persist something.
+            if (!tmpFile.renameTo(cookieFile)) {
+                cookieFile.writeText(json)
+                tmpFile.delete()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -238,27 +271,32 @@ class PersistentCookieJar(private val context: Context) : CookieJar {
     // Reads and deserializes the cookie file on startup. Expired cookies are
     // skipped immediately so they don't enter the in-memory map at all.
     private fun loadCookies() {
-        try {
-            if (cookieFile.exists()) {
-                val json = cookieFile.readText()
-                val loaded = adapter.fromJson(json) ?: return
-                val now = System.currentTimeMillis()
-                for (sc in loaded) {
-                    if (sc.expiresAt <= now) continue
-                    val cookie = sc.toCookie() ?: continue
-                    cookies.getOrPut(sc.host) { mutableListOf() }.add(cookie)
+        synchronized(lock) {
+            try {
+                if (cookieFile.exists()) {
+                    val json = cookieFile.readText()
+                    val loaded = adapter.fromJson(json) ?: return
+                    val now = System.currentTimeMillis()
+                    for (sc in loaded) {
+                        if (sc.expiresAt <= now) continue
+                        val cookie = sc.toCookie() ?: continue
+                        cookies.getOrPut(sc.host) { mutableListOf() }.add(cookie)
+                    }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
     // Clears all in-memory cookies and deletes the on-disk file. Called during
     // logout so the next app launch starts with no session.
     fun clear() {
-        cookies.clear()
-        cookieFile.delete()
+        synchronized(lock) {
+            cookies.clear()
+            cookieFile.delete()
+            tmpFile.delete()
+        }
     }
 }
 

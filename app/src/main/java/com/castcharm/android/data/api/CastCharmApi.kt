@@ -38,6 +38,19 @@ interface CastCharmApi {
     @POST("api/auth/logout")
     suspend fun logout()
 
+    // Trades a valid login session for a permanent API key. Requires a session
+    // cookie, so it can only be called right after login (or while an existing
+    // cookie is still good, which is how already-installed apps migrate).
+    // Returns 404 on servers too old to support keys — callers must tolerate that
+    // and stay on cookie auth.
+    @POST("api/auth/exchange-key")
+    suspend fun exchangeKey(@Body request: ExchangeKeyRequest): ApiKeyCreated
+
+    // Revokes the key used to make this very request. Called on logout so the
+    // device doesn't leave a live credential behind on the server.
+    @DELETE("api/settings/api-keys/self")
+    suspend fun revokeOwnKey()
+
     // ---- Feeds --------------------------------------------------------------
     @GET("api/feeds")
     suspend fun getFeeds(): List<FeedOut>

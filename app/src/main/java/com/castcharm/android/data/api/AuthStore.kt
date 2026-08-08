@@ -1,0 +1,86 @@
+package com.castcharm.android.data.api
+
+// AuthStore holds the server-issued API key that authenticates this device.
+//
+// The key replaces the session cookie as the app's primary credential. A cookie
+// carries a fixed expiry stamped at login time which the server never refreshes,
+// so it lapses on a schedule no matter how actively the app is used. An API key
+// has no expiry at all — it stays valid until revoked, either from the server's
+// web UI or by this device on logout.
+//
+// The value is cached in a @Volatile field because OkHttp interceptors run on
+// background threads and must not suspend. keyBlocking() populates that cache on
+// first use, which also covers the awkward Android case where a ContentProvider
+// (PodcastArtworkProvider) is created *before* Application.onCreate() has run.
+
+import android.content.Context
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import com.castcharm.android.dataStore
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.runBlocking
+
+object AuthStore {
+    private val apiKeyKey = stringPreferencesKey("api_key")
+
+    @Volatile
+    private var cachedKey: String? = null
+
+    // Distinct from "cachedKey != null": once we have read DataStore we stop
+    // re-reading it, whether or not a key was actually found.
+    @Volatile
+    private var loaded: Boolean = false
+
+    val hasKey: Boolean
+        get() = cachedKey != null
+
+    /** Suspending load, called once from Application.onCreate(). */
+    suspend fun load(context: Context) {
+        if (loaded) return
+        cachedKey = context.dataStore.data.firstOrNull()?.get(apiKeyKey)
+        loaded = true
+    }
+
+    /**
+     * Blocking read for OkHttp interceptors. After the first call this is just a
+     * volatile field read; the runBlocking only happens once per process, and
+     * only when the cache has not been warmed by load() yet.
+     */
+    fun keyBlocking(context: Context): String? {
+        if (loaded) return cachedKey
+        return synchronized(this) {
+            if (!loaded) runBlocking { load(context) }
+            cachedKey
+        }
+    }
+
+    suspend fun save(context: Context, key: String) {
+        context.dataStore.edit { prefs -> prefs[apiKeyKey] = key }
+        cachedKey = key
+        loaded = true
+    }
+
+    suspend fun clear(context: Context) {
+        context.dataStore.edit { prefs -> prefs.remove(apiKeyKey) }
+        cachedKey = null
+        loaded = true
+    }
+}
+
+/**
+ * Attaches the stored API key to every outgoing request.
+ *
+ * Falls through untouched when no key is stored, so a build that has not yet
+ * enrolled — or is talking to a server too old to issue keys — keeps working on
+ * cookie auth exactly as before.
+ */
+class ApiKeyInterceptor(private val context: Context) : okhttp3.Interceptor {
+    override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+        val key = AuthStore.keyBlocking(context) ?: return chain.proceed(chain.request())
+        return chain.proceed(
+            chain.request().newBuilder()
+                .header("X-API-Key", key)
+                .build()
+        )
+    }
+}

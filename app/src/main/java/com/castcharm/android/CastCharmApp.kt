@@ -23,7 +23,11 @@ import androidx.datastore.preferences.preferencesDataStore
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.castcharm.android.data.api.ApiClient
+import com.castcharm.android.data.api.AuthStore
 import com.castcharm.android.player.PlayerController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -69,6 +73,9 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         val reconnectErrorMessage
             get() = appSessionManager.reconnectErrorMessage
 
+        val usingFallbackCookieAuth
+            get() = appSessionManager.usingFallbackCookieAuth
+
         val isOfflineMode: Boolean
             get() = appSessionManager.isOfflineMode
 
@@ -78,6 +85,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         suspend fun tryReconnectInPlace() = appSessionManager.tryReconnectInPlace()
         suspend fun completeLogin() = appSessionManager.completeLogin()
         suspend fun logoutAndForgetSession() = appSessionManager.logoutAndForgetSession()
+        suspend fun retryApiKeyEnrolment() = appSessionManager.retryApiKeyEnrolment()
         fun reportServerReachable() = appSessionManager.reportServerReachable()
         fun reportServerUnreachable() = appSessionManager.reportServerUnreachable()
         fun reportAuthInvalid() = appSessionManager.reportAuthInvalid()
@@ -90,6 +98,9 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         apiClient = ApiClient(this)
         playerController = PlayerController(this)
         appSessionManager = AppSessionManager(this)
+        // Warm the API-key cache so interceptors on background threads read a
+        // plain field instead of falling back to a blocking DataStore read.
+        CoroutineScope(Dispatchers.IO).launch { AuthStore.load(this@CastCharmApp) }
         // Build the Coil ImageLoader with an AuthAwareCallFactory so all image
         // requests (artwork, feed covers) go through the authenticated OkHttpClient.
         // crossfade(200) applies a short fade-in transition when images load.

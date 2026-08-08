@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto-backup exclusion rules used on Android 11 and below.
+  Both the DataStore file (which holds the API key, saved server URL, and the
+  hasAuthenticatedBefore flag) and the persistent cookie jar are credentials —
+  they must never be copied to Google account backup or ADB backup.
+-->
+<full-backup-content>
+    <exclude domain="file" path="cookies.json"/>
+    <exclude domain="file" path="datastore/"/>
+</full-backup-content>

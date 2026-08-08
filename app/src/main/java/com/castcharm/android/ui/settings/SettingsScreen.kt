@@ -202,13 +202,18 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
     var showClearConfirm by remember { mutableStateOf(false) }
     var showChangeServerDialog by remember { mutableStateOf(false) }
+    val usingFallbackCookie by CastCharmApp.usingFallbackCookieAuth.collectAsState()
+    var retryingKeyEnrolment by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {AppTopBarTitle(text="Settings")}
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -256,6 +261,79 @@ fun SettingsScreen(
                         onRetryConnection = onTryReconnect,
                         retryLabel = "Try reconnecting"
                     )
+                }
+
+                // Fallback-cookie warning: the app is logged in but running on a
+                // short-lived session cookie because the server refused to issue
+                // an API key. Almost always this is because External API access
+                // has been switched off server-side; the retry button re-attempts
+                // enrolment so the user can fix the cause and confirm without
+                // relogging in.
+                if (usingFallbackCookie && !isOfflineMode) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Session will expire",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Text(
+                                "This device is signed in with a short-lived session because your server has External API access turned off. " +
+                                    "Turn it on under Settings → External API on the server, then tap Retry so this device gets a permanent key. " +
+                                    "Otherwise you'll be asked to sign in again soon.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Button(
+                                onClick = {
+                                    if (retryingKeyEnrolment) return@Button
+                                    retryingKeyEnrolment = true
+                                    scope.launch {
+                                        try {
+                                            val ok = CastCharmApp.retryApiKeyEnrolment()
+                                            snackbarHostState.showSnackbar(
+                                                if (ok) "This device is now enrolled with a permanent key."
+                                                else "Still unable to enrol — check that External API is enabled on the server."
+                                            )
+                                        } finally {
+                                            retryingKeyEnrolment = false
+                                        }
+                                    }
+                                },
+                                enabled = !retryingKeyEnrolment,
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                if (retryingKeyEnrolment) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Retrying…")
+                                } else {
+                                    Text("Retry enrolment")
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Card(modifier = Modifier.fillMaxWidth()) {

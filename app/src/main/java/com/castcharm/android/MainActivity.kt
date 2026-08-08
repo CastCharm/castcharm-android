@@ -627,7 +627,7 @@ fun MainScaffold(
 
                         DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
                             val observer = LifecycleEventObserver { _, event ->
-                                if (!isOfflineMode && event == Lifecycle.Event.ON_RESUME) {
+                                if (event == Lifecycle.Event.ON_RESUME) {
                                     dashVm.refresh()
                                 }
                             }

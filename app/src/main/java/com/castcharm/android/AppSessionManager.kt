@@ -14,6 +14,8 @@ package com.castcharm.android
 // avoids false alarms from transient network blips.
 
 import android.content.Context
+import android.os.Build
+import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -22,6 +24,8 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.castcharm.android.data.api.AuthStore
+import com.castcharm.android.data.api.models.ExchangeKeyRequest
 import com.castcharm.android.sync.SyncWorker
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -98,6 +102,14 @@ class AppSessionManager(
     // Cleared by clearReconnectError() after the UI has shown it.
     private val _reconnectErrorMessage = MutableStateFlow<String?>(null)
     val reconnectErrorMessage: StateFlow<String?> = _reconnectErrorMessage.asStateFlow()
+
+    // True when the app is authenticated but the server refused to issue an
+    // API key (usually because external API access is switched off server-side).
+    // We're currently running on a 30-day session cookie and will silently be
+    // kicked to the login screen when it lapses. Surfaced in the Settings
+    // screen so the user can turn the server switch back on and retry.
+    private val _usingFallbackCookieAuth = MutableStateFlow(false)
+    val usingFallbackCookieAuth: StateFlow<Boolean> = _usingFallbackCookieAuth.asStateFlow()
 
     // ---- Transient failure tracking (for the 3-in-8s threshold) --------------
     // @Volatile ensures visibility across threads (the OkHttp interceptor calls
@@ -264,16 +276,42 @@ class AppSessionManager(
         _authState.value = AppAuthState.LoggedIn
         clearReconnectError()
         resetTransientFailureTracking()
+        // Any successful re-enrolment updates AuthStore, so a stale banner from
+        // a previous fallback session clears the moment we're back on key auth.
+        AuthStore.load(appContext)
+        _usingFallbackCookieAuth.value = !AuthStore.hasKey
         enqueueImmediateSync()
     }
 
+    /**
+     * Retry API-key enrolment when the user has fixed the server-side reason
+     * we ended up on cookie auth (typically by turning External API back on).
+     * Returns true when a key is now held.
+     */
+    suspend fun retryApiKeyEnrolment(): Boolean {
+        val ok = ensureApiKey(appContext, force = false)
+        _usingFallbackCookieAuth.value = !AuthStore.hasKey
+        return ok
+    }
+
     suspend fun logoutAndForgetSession() {
+        // Ask the server to revoke this device's key before dropping it locally,
+        // so logging out actually removes the device from the server's client list
+        // instead of leaving a live credential behind. Best-effort: if the server
+        // is unreachable we still clear everything on this device.
+        AuthStore.load(appContext)   // hasKey is meaningless until the cache is warm
+        if (AuthStore.hasKey) {
+            runCatching { CastCharmApp.apiClient.getApi().revokeOwnKey() }
+                .onFailure { Log.i("AppSessionManager", "Could not revoke key server-side", it) }
+        }
+        AuthStore.clear(appContext)
         CastCharmApp.apiClient.clearCookies()
         enterOnlineMode()
         appContext.dataStore.edit { prefs ->
             prefs[hasAuthenticatedBeforeKey] = false
         }
         _authState.value = AppAuthState.NotLoggedIn
+        _usingFallbackCookieAuth.value = false
         clearReconnectError()
         resetTransientFailureTracking()
     }
@@ -322,13 +360,16 @@ class AppSessionManager(
         }
     }
 
-    // Called by SessionStateInterceptor on 401/403 responses. Immediately drops
-    // the session — cookies are still present but the server rejected them — and
-    // emits AuthInvalid so the UI can show a "please log in again" snackbar.
+    // Called by SessionStateInterceptor on a 401. Immediately drops the session —
+    // the credential is still present but the server rejected it — and emits
+    // AuthInvalid so the UI can show a "please log in again" snackbar.
     fun reportAuthInvalid() {
         enterOnlineMode()
         _authState.value = AppAuthState.NotLoggedIn
         _reconnectInFlight.value = false
+        // The banner is meaningless without a session; clearing it means a
+        // fresh login flow starts without stale UI carried over.
+        _usingFallbackCookieAuth.value = false
         clearReconnectError()
         resetTransientFailureTracking()
         _sessionEvents.tryEmit(AppSessionEvent.AuthInvalid)
@@ -392,6 +433,15 @@ class AppSessionManager(
             // auth_enabled=false means the server has no password protection; the user
             // is implicitly "logged in" without credentials.
             if (!status.auth_enabled || status.logged_in) {
+                // Upgrade path for installs that predate key auth: while the old
+                // session cookie is still valid, quietly trade it for a key. Doing it
+                // here means an existing user is migrated on their next launch and
+                // never sees a login screen.
+                ensureApiKey(appContext)
+                // After the upgrade attempt, we know for sure whether we have a
+                // key. If not (e.g. server has API disabled), surface the banner
+                // so the user isn't blindsided in 30 days when the cookie lapses.
+                _usingFallbackCookieAuth.value = !AuthStore.hasKey
                 SessionCheckResult.LOGGED_IN
             } else {
                 SessionCheckResult.NOT_LOGGED_IN
@@ -399,5 +449,42 @@ class AppSessionManager(
         } catch (_: Exception) {
             SessionCheckResult.UNREACHABLE
         }
+    }
+}
+
+// Enrols this device for API-key auth if it hasn't already. Requires a valid
+// session, so it is called straight after login and on any startup where the
+// existing cookie still checks out.
+//
+// Best-effort by design: any failure leaves the app on cookie auth, exactly as it
+// behaved before keys existed. That matters for two cases in particular —
+//   - the server predates the exchange endpoint and answers 404
+//   - external API access is switched off server-side, giving 403
+// neither of which should block a user who can otherwise sign in perfectly well.
+//
+// force=true discards any stored key and enrols a fresh one. Used on an explicit
+// login, because the usual reason a user is back at that screen is that their key
+// stopped working — most likely revoked from the server's client list. Without it
+// the dead key would survive the re-login and trap the user in a loop of signing
+// in, being rejected, and signing in again.
+suspend fun ensureApiKey(context: Context, force: Boolean = false): Boolean {
+    // hasKey reads a cache that is empty until load() runs, so load first —
+    // otherwise a device that already holds a key would enrol a duplicate.
+    AuthStore.load(context)
+    if (force) AuthStore.clear(context)
+    if (AuthStore.hasKey) return true
+    return try {
+        val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .ifBlank { "Android device" }
+        val created = CastCharmApp.apiClient.getApi()
+            .exchangeKey(ExchangeKeyRequest(deviceName))
+        AuthStore.save(context, created.key)
+        Log.i("AppSessionManager", "Enrolled API key '${created.name}' for this device")
+        true
+    } catch (e: Exception) {
+        Log.i("AppSessionManager", "API key enrolment unavailable, staying on cookie auth", e)
+        false
     }
 }

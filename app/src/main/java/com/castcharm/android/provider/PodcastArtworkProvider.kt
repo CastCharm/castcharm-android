@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.R
+import com.castcharm.android.data.api.ApiKeyInterceptor
 import com.castcharm.android.data.api.PersistentCookieJar
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
@@ -63,6 +64,7 @@ class PodcastArtworkProvider : ContentProvider() {
                 if (url != null) {
                     val client = OkHttpClient.Builder()
                         .cookieJar(PersistentCookieJar(context))
+                        .addInterceptor(ApiKeyInterceptor(context))
                         .connectTimeout(15, TimeUnit.SECONDS)
                         .readTimeout(30, TimeUnit.SECONDS)
                         .build()
@@ -100,10 +102,13 @@ class PodcastArtworkProvider : ContentProvider() {
     }
 
     private lateinit var db: AppDatabase
+    // A ContentProvider is created before Application.onCreate(), so AuthStore's
+    // cache may still be cold here; ApiKeyInterceptor loads it on first use.
     private val httpClient by lazy {
         val cookieJar = PersistentCookieJar(context!!)
         OkHttpClient.Builder()
             .cookieJar(cookieJar)
+            .addInterceptor(ApiKeyInterceptor(context!!))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()

@@ -18,6 +18,23 @@ data class LoginRequest(
     val password: String
 )
 
+// POST /api/auth/exchange-key body. Trades the current login session for a
+// long-lived API key. name is what shows up in the server's client list, so it
+// should identify the device (we use the hardware model).
+data class ExchangeKeyRequest(
+    val name: String
+)
+
+// POST /api/auth/exchange-key response. key is the plaintext credential and is
+// returned exactly once — the server stores only a hash of it, so it cannot be
+// read back later. The server identifies the key from the request header on
+// self-revoke, so the id doesn't need keeping client-side.
+data class ApiKeyCreated(
+    val id: Int,
+    val name: String,
+    val key: String
+)
+
 // POST /api/episodes/{id}/progress body. Sent every 10 seconds while playing
 // and on pause/stop. position_seconds is the current player position.
 data class ProgressRequest(

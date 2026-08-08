@@ -62,6 +62,7 @@ import com.castcharm.android.AppAuthState
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.MainActivity
 import com.castcharm.android.R
+import com.castcharm.android.data.api.ApiKeyInterceptor
 import com.castcharm.android.data.api.models.ProgressRequest
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
@@ -350,6 +351,7 @@ class PlayerService : MediaLibraryService() {
             }
             val streamingClient = OkHttpClient.Builder()
                 .cookieJar(streamingCookieJar)
+                .addInterceptor(ApiKeyInterceptor(this@PlayerService))
                 .addInterceptor { chain ->
                     ensureApiClientInitializedBlocking(this@PlayerService)
                     // Fail loudly if init failed — better than proceeding without auth
@@ -358,7 +360,12 @@ class PlayerService : MediaLibraryService() {
                         throw IOException("Cannot stream: server connection unavailable")
                     }
                     val response = chain.proceed(chain.request())
-                    if (response.code == 401 || response.code == 403) {
+                    // 401 ONLY — see the matching note in SessionStateInterceptor.
+                    // /stream returns 403 when an episode's stored path no longer sits
+                    // under the download directory, so treating 403 as an expired
+                    // session logged the user out for merely pressing play on one bad
+                    // episode.
+                    if (response.code == 401) {
                         // Mirror SessionStateInterceptor: drive the auth state machine
                         // so the UI transitions to the login screen on session expiry,
                         // just as it does for regular API calls.

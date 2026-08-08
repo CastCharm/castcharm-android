@@ -64,7 +64,13 @@ fun LoginScreen(
             modifier = Modifier.padding(bottom = 48.dp)
         )
 
-        // Server URL
+        // The credential fields only appear once we know they're needed —
+        // stops users on a passwordless server from wondering why blank fields
+        // are staring at them.
+        val showCredentials = uiState.phase == LoginPhase.NEEDS_CREDS
+
+        // Server URL. Enabled unless we're mid-request; editing it resets the
+        // phase back to URL_ONLY so a change hides stale credential fields.
         OutlinedTextField(
             value = uiState.serverUrl,
             onValueChange = { viewModel.updateServerUrl(it) },
@@ -85,48 +91,50 @@ fun LoginScreen(
             )
         )
 
-        // Username
-        OutlinedTextField(
-            value = uiState.username,
-            onValueChange = { viewModel.updateUsername(it) },
-            label = { Text("Username") },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
-            singleLine = true,
-            enabled = !uiState.isLoading
-        )
+        if (showCredentials) {
+            // Username
+            OutlinedTextField(
+                value = uiState.username,
+                onValueChange = { viewModel.updateUsername(it) },
+                label = { Text("Username") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                singleLine = true,
+                enabled = !uiState.isLoading
+            )
 
-        // Password
-        OutlinedTextField(
-            value = uiState.password,
-            onValueChange = { viewModel.updatePassword(it) },
-            label = { Text("Password") },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            singleLine = true,
-            enabled = !uiState.isLoading,
-            visualTransformation = if (showPassword) VisualTransformation.None
-                                   else PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Password,
-                autoCorrect = false,
-                imeAction = ImeAction.Done
-            ),
-            trailingIcon = {
-                IconButton(
-                    onClick = { showPassword = !showPassword },
-                    enabled = !uiState.isLoading
-                ) {
-                    Icon(
-                        imageVector = if (showPassword) Icons.Default.Visibility
-                                      else Icons.Default.VisibilityOff,
-                        contentDescription = "Toggle password visibility"
-                    )
+            // Password
+            OutlinedTextField(
+                value = uiState.password,
+                onValueChange = { viewModel.updatePassword(it) },
+                label = { Text("Password") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+                singleLine = true,
+                enabled = !uiState.isLoading,
+                visualTransformation = if (showPassword) VisualTransformation.None
+                                       else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    autoCorrect = false,
+                    imeAction = ImeAction.Done
+                ),
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showPassword = !showPassword },
+                        enabled = !uiState.isLoading
+                    ) {
+                        Icon(
+                            imageVector = if (showPassword) Icons.Default.Visibility
+                                          else Icons.Default.VisibilityOff,
+                            contentDescription = "Toggle password visibility"
+                        )
+                    }
                 }
-            }
-        )
+            )
+        }
 
         // Error
         if (uiState.errorMessage != null) {
@@ -147,9 +155,14 @@ fun LoginScreen(
             }
         }
 
-        // Login button
+        // Connect / Login button. The label and target action depend on which
+        // phase we're in: URL_ONLY tests the server, NEEDS_CREDS submits the
+        // password. NO_PASSWORD auto-progresses inside connect() so it never
+        // becomes a visible phase here.
         Button(
-            onClick = { viewModel.login() },
+            onClick = {
+                if (showCredentials) viewModel.login() else viewModel.connect()
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(48.dp),
@@ -164,9 +177,9 @@ fun LoginScreen(
                     color = MaterialTheme.colorScheme.onPrimary
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("Connecting...")
+                Text(if (showCredentials) "Signing in..." else "Connecting...")
             } else {
-                Text("Login")
+                Text(if (showCredentials) "Login" else "Connect")
             }
         }
     }

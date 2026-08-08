@@ -26,6 +26,7 @@ import androidx.room.withTransaction
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.castcharm.android.data.api.ApiKeyInterceptor
 import com.castcharm.android.data.api.PersistentCookieJar
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
@@ -253,12 +254,13 @@ class DownloadWorker(
             )
 
             // Build a dedicated OkHttpClient for the streaming download.
-            // PersistentCookieJar attaches the session cookie so the server
-            // authenticates the request. readTimeout(0) disables the read
-            // deadline — without this, a large file or slow connection would
-            // time out mid-stream after the default 10s idle window.
+            // ApiKeyInterceptor supplies the credential; the cookie jar stays as a
+            // fallback for servers too old to issue keys. readTimeout(0) disables
+            // the read deadline — without this, a large file or slow connection
+            // would time out mid-stream after the default 10s idle window.
             val client = OkHttpClient.Builder()
                 .cookieJar(PersistentCookieJar(applicationContext))
+                .addInterceptor(ApiKeyInterceptor(applicationContext))
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
                 .build()
