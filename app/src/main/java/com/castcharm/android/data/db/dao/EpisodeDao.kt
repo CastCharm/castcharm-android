@@ -295,5 +295,38 @@ interface EpisodeDao {
         // insertAll handles the insert/update routing based on whether each row
         // already exists in the DB.
         insertAll(merged)
+
+        syncFeedArtworkOntoEpisodes()
     }
+
+    /**
+     * Copies each feed's current artwork URL down onto its episodes.
+     *
+     * feed_image_url is only ever a denormalised copy of the feed's artwork, but the
+     * server fills it from the feed's RAW rss image — which is null for a podcast
+     * whose art comes from a local cover on the server. Episodes then fell back to
+     * building `api/feeds/{id}/cover.jpg` themselves, with no cache-busting token,
+     * across five different screens. On a recycled feed id that URL is identical to
+     * the one cached for the podcast that previously held the id, so every episode
+     * row showed the old podcast's art even after the feed card was fixed.
+     *
+     * Taking the value from the feeds table instead means episodes inherit the
+     * tokenised URL FeedRepository already stores, and every screen is fixed at once.
+     * Re-run on each merge so a changed cover propagates rather than sticking.
+     */
+    @Query(
+        """
+        UPDATE episodes
+        SET feed_image_url = (
+            SELECT f.image_url FROM feeds f WHERE f.id = episodes.feed_id
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM feeds f
+            WHERE f.id = episodes.feed_id
+              AND f.image_url IS NOT NULL
+              AND IFNULL(episodes.feed_image_url, '') != f.image_url
+        )
+        """
+    )
+    suspend fun syncFeedArtworkOntoEpisodes()
 }
