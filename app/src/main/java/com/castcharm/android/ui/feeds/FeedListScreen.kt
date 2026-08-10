@@ -180,12 +180,24 @@ fun FeedListScreen(
         }
 
         PullToRefreshBox(
-            isRefreshing = uiState.isRefreshing,
-            onRefresh = { viewModel.refreshFeeds() },
+            // Pull indicator responds to pulls only — see isPullRefreshing.
+            isRefreshing = uiState.isPullRefreshing,
+            onRefresh = { viewModel.refreshFeeds(fromPull = true) },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding()),
         ) {
+            // An automatic refresh (arriving at the tab, or coming back online) gets
+            // a centred spinner instead. Suppressed while the skeletons are up, since
+            // those already say "loading" and two indicators at once reads as a bug.
+            if (uiState.isRefreshing && !uiState.isPullRefreshing && uiState.feeds.isNotEmpty()) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .semantics { contentDescription = "Loading podcasts" }
+                )
+            }
+
             when {
                 uiState.isInitialLoading && uiState.feeds.isEmpty() -> {
                     LazyVerticalGrid(

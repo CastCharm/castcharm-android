@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -89,6 +90,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.ui.playlists.AddToPlaylistSheet
+import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.SelectionAction
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
 import com.castcharm.android.ui.shared_components.EpisodeCard
@@ -280,44 +283,9 @@ fun EpisodeListScreen(
                 },
                 actions = {
                     when {
-                        isSelectionMode -> {
-                            // Whether "mark played" or "mark unplayed" is the primary
-                            // action depends on the majority state of the selection —
-                            // showing whichever change would affect the most rows.
-                            val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
-                                uiState.episodes.filter { it.id in uiState.selectedEpisodes }
-                                    .all { it.played }
-                            TextButton(onClick = { viewModel.selectAll() }) {
-                                Text("All")
-                            }
-                            IconButton(
-                                onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) },
-                            ) {
-                                if (allSelectedPlayed) {
-                                    Icon(
-                                        Icons.Default.RadioButtonUnchecked,
-                                        contentDescription = "Mark unplayed",
-                                    )
-                                } else {
-                                    Icon(
-                                        Icons.Default.CheckCircle,
-                                        contentDescription = "Mark played",
-                                    )
-                                }
-                            }
-                            IconButton(
-                                onClick = { showDeleteDownloadsConfirm = true },
-                                enabled = anySelectedDownloaded,
-                            ) {
-                                Icon(
-                                    Icons.Default.DeleteForever,
-                                    contentDescription = "Delete downloads",
-                                )
-                            }
-                            IconButton(onClick = { showDownloadConfirm = true }) {
-                                Icon(Icons.Default.PhoneAndroid, contentDescription = "Download to phone")
-                            }
-                        }
+                        // Bulk actions live in the SelectionActionBar at the bottom
+                        // of this screen, where they can carry text labels.
+                        isSelectionMode -> Unit
 
                         isOfflineMode && onRetryConnection != null -> {
                             ReconnectIconButton(
@@ -362,6 +330,47 @@ fun EpisodeListScreen(
                     }
                 }
             )
+        },
+        bottomBar = {
+            if (isSelectionMode) {
+                // Whether "mark played" or "mark unplayed" is offered depends on the
+                // current state of the selection — showing whichever change would
+                // actually alter the picked rows.
+                val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
+                    uiState.episodes.filter { it.id in uiState.selectedEpisodes }
+                        .all { it.played }
+
+                SelectionActionBar(
+                    actions = listOf(
+                        SelectionAction(
+                            icon = Icons.Default.SelectAll,
+                            label = "Select all",
+                            onClick = { viewModel.selectAll() }
+                        ),
+                        SelectionAction(
+                            icon = if (allSelectedPlayed) {
+                                Icons.Default.RadioButtonUnchecked
+                            } else {
+                                Icons.Default.CheckCircle
+                            },
+                            label = if (allSelectedPlayed) "Mark unplayed" else "Mark played",
+                            onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) }
+                        ),
+                        SelectionAction(
+                            icon = Icons.Default.PhoneAndroid,
+                            label = "Download",
+                            onClick = { showDownloadConfirm = true }
+                        ),
+                        SelectionAction(
+                            icon = Icons.Default.DeleteForever,
+                            label = "Delete files",
+                            onClick = { showDeleteDownloadsConfirm = true },
+                            enabled = anySelectedDownloaded,
+                            destructive = true
+                        ),
+                    )
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->

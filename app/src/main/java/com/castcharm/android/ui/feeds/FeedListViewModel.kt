@@ -28,6 +28,11 @@ data class FeedListUiState(
     val feeds: List<FeedEntity> = emptyList(),
     val isInitialLoading: Boolean = true,
     val isRefreshing: Boolean = false,
+    // True only while a refresh the USER started by pulling down is in flight.
+    // PullToRefreshBox is driven by this, never by isRefreshing: an automatic load
+    // on arriving at the tab would otherwise animate the pull indicator and make it
+    // look as though the user had swiped when they hadn't.
+    val isPullRefreshing: Boolean = false,
     val isSyncing: Boolean = false,
     val isAddingFeed: Boolean = false,
     val syncingFeedIds: Set<Int> = emptySet(),
@@ -163,11 +168,12 @@ class FeedListViewModel : ViewModel() {
         }
     }
 
-    fun refreshFeeds() {
+    fun refreshFeeds(fromPull: Boolean = false) {
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isRefreshing = true,
+                    isPullRefreshing = fromPull,
                     isInitialLoading = it.feeds.isEmpty()
                 )
             }
@@ -176,6 +182,7 @@ class FeedListViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
+                        isPullRefreshing = false,
                         isInitialLoading = false,
                         errorMessage = null
                     )
@@ -190,6 +197,7 @@ class FeedListViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
+                        isPullRefreshing = false,
                         errorMessage = null
                     )
                 }
@@ -198,6 +206,7 @@ class FeedListViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
+                        isPullRefreshing = false,
                         isInitialLoading = false,
                         errorMessage = "Failed to refresh feeds: ${e.localizedMessage}"
                     )

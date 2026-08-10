@@ -115,8 +115,12 @@ fun DashboardScreen(
             uiState.backlogLoading
 
         PullToRefreshBox(
-            isRefreshing = anyLoading,
-            onRefresh = { viewModel.refresh() },
+            // Was `anyLoading`, which meant every automatic section load animated the
+            // pull indicator — it looked as though the user had swiped down when they
+            // had only opened the tab. Pulls only now; the per-section skeletons
+            // already signal an automatic load.
+            isRefreshing = uiState.isPullRefreshing,
+            onRefresh = { viewModel.refresh(fromPull = true) },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding()),

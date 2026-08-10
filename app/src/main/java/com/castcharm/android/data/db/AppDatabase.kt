@@ -36,16 +36,25 @@ abstract class AppDatabase : RoomDatabase() {
         private var INSTANCE: AppDatabase? = null
 
         fun getDatabase(context: Context): AppDatabase {
-            // Double-checked locking: check INSTANCE without the lock first for
-            // performance, then enter the lock only when INSTANCE is null.
+            // Double-checked locking. The second check, inside the lock, is the
+            // half that actually makes this safe and was previously missing: two
+            // threads could both see a null INSTANCE, both enter the lock in turn,
+            // and both build a database, with the second silently replacing the
+            // first. Room's InvalidationTracker is per-instance, so every Flow
+            // already collecting from the discarded instance would stop receiving
+            // change notifications — screens would quietly stop updating until the
+            // process restarted. Reachable on a cold start, where a ContentProvider
+            // (created before Application.onCreate), a WorkManager worker and
+            // PlayerService can all reach this on different threads at once.
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "castcharm.db"
-                ).fallbackToDestructiveMigration().build()
-                INSTANCE = instance
-                instance
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

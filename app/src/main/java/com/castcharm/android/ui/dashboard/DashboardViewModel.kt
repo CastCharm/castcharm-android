@@ -62,6 +62,10 @@ data class DashboardUiState(
     val suggestionsLoading: Boolean = true,
     val backlogLoading: Boolean = true,
     val isRefreshing: Boolean = false,
+    // True only while a refresh the USER started by pulling down is in flight.
+    // PullToRefreshBox is driven by this alone — an automatic load on arriving at
+    // the tab must not animate the pull indicator, which reads as a phantom swipe.
+    val isPullRefreshing: Boolean = false,
     val errorMessage: String? = null
 )
 
@@ -182,7 +186,7 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
-    fun refresh() {
+    fun refresh(fromPull: Boolean = false) {
         // Belt-and-braces alongside the caller's guard: every other ViewModel
         // refuses to hit the network while offline, and this one used to be the
         // exception. In offline mode it would set isRefreshing, fire a full set of
@@ -195,6 +199,7 @@ class DashboardViewModel : ViewModel() {
             _uiState.update {
                 it.copy(
                     isRefreshing = true,
+                    isPullRefreshing = fromPull,
                     errorMessage = null,
                     statsLoading = it.podcastsTotal == 0 && it.feedsTotal == 0,
                     feedHealthLoading = it.feedErrors.isEmpty(),
@@ -252,6 +257,7 @@ class DashboardViewModel : ViewModel() {
                             suggestionsLoading = false,
                             backlogLoading = false,
                             isRefreshing = false,
+                    isPullRefreshing = false,
                             errorMessage = null
                         )
                     }
@@ -364,6 +370,7 @@ class DashboardViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
+                    isPullRefreshing = false,
                         errorMessage = if (sawAnyFailure) {
                             "Some dashboard sections failed to refresh."
                         } else {
@@ -382,6 +389,7 @@ class DashboardViewModel : ViewModel() {
                         suggestionsLoading = false,
                         backlogLoading = false,
                         isRefreshing = false,
+                    isPullRefreshing = false,
                         errorMessage = "Dashboard unavailable right now."
                     )
                 }

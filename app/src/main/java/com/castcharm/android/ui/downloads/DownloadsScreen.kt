@@ -79,6 +79,8 @@ import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.download.BandwidthTracker
 import com.castcharm.android.ui.settings.formatBytes
+import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.SelectionAction
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.EpisodeCard
 import com.castcharm.android.ui.shared_components.EpisodeDownloadActionOverride
@@ -214,11 +216,9 @@ fun DownloadsScreen(
                 },
                 actions = {
                     when {
-                        isSelectionMode -> {
-                            IconButton(onClick = { showDeleteSelectedConfirm = true }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete selected")
-                            }
-                        }
+                        // Bulk actions live in the SelectionActionBar at the bottom,
+                        // where they can carry text labels.
+                        isSelectionMode -> Unit
 
                         !isOfflineMode -> {
                             // Show a spinner alongside the menu while refreshing so the menu stays accessible.
@@ -276,6 +276,20 @@ fun DownloadsScreen(
                     }
                 }
             )
+        },
+        bottomBar = {
+            if (isSelectionMode) {
+                SelectionActionBar(
+                    actions = listOf(
+                        SelectionAction(
+                            icon = Icons.Default.Delete,
+                            label = "Delete from device",
+                            onClick = { showDeleteSelectedConfirm = true },
+                            destructive = true
+                        ),
+                    )
+                )
+            }
         }
     ) { padding ->
         Column(
