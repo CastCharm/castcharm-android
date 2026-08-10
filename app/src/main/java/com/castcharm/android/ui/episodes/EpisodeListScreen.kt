@@ -456,6 +456,7 @@ fun EpisodeListScreen(
                             episode = episode,
                             baseUrl = baseUrl,
                             isSelected = isSelected,
+                            selectionActive = isSelectionMode,
                             expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                             onToggleExpand = {
                                 if (isSelectionMode) {

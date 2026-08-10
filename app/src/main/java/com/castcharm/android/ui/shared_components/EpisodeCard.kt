@@ -14,7 +14,9 @@ package com.castcharm.android.ui.shared_components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,10 +24,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -101,6 +105,11 @@ fun EpisodeCard(
     baseUrl: String,
     feedImageUrl: String? = null,
     isSelected: Boolean = false,
+    // True whenever multi-select is active, regardless of whether *this* row is
+    // picked. Lets unselected rows show an empty checkbox, so the distinction is
+    // between two obviously different marks rather than a background tint the user
+    // has to hunt for.
+    selectionActive: Boolean = false,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onLongPress: (() -> Unit)? = null,
@@ -144,8 +153,11 @@ fun EpisodeCard(
         else -> EpisodeDownloadActionOverride.SAVE_TO_SERVER
     }
 
-    // The card background changes to primaryContainer when the episode is in
-    // multi-select mode (isSelected=true), giving a clear selection highlight.
+    // Selection is signalled three ways at once, so it survives any theme and does
+    // not depend on telling two similar background colours apart: a check badge over
+    // the artwork (see below), an accent border, and a raised elevation. The tinted
+    // container alone used to be the only cue, and in several of the darker themes
+    // primaryContainer sits very close to the card surface.
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -154,6 +166,16 @@ fun EpisodeCard(
             CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
         } else {
             CardDefaults.cardColors()
+        },
+        border = if (isSelected) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
+        elevation = if (isSelected) {
+            CardDefaults.cardElevation(defaultElevation = 6.dp)
+        } else {
+            CardDefaults.cardElevation()
         }
     ) {
         Column {
@@ -168,13 +190,59 @@ fun EpisodeCard(
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                PlaceholderArtwork(
-                    imageUrl = imageUrl,
-                    contentDescription = episode.title,
-                    modifier = Modifier.size(48.dp),
-                    contentScale = ContentScale.Crop,
-                    cornerRadiusDp = 6
-                )
+                // While multi-select is active the artwork doubles as the checkbox.
+                // Every row gets a mark — filled tick or empty ring — so "selected"
+                // and "not selected" differ by shape, which stays legible over any
+                // cover art and in any theme.
+                Box(modifier = Modifier.size(48.dp)) {
+                    PlaceholderArtwork(
+                        imageUrl = imageUrl,
+                        contentDescription = episode.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        cornerRadiusDp = 6
+                    )
+
+                    if (selectionActive) {
+                        if (isSelected) {
+                            // Picked rows light up: the whole thumbnail takes an
+                            // accent wash so they stand out at a glance while
+                            // scanning the list.
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                                    )
+                            )
+                        } else {
+                            // Unselected rows deliberately keep their artwork
+                            // untouched — washing out every thumbnail the moment
+                            // multi-select opens makes the list look broken. Just a
+                            // small backdrop so the ring reads over busy cover art.
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.45f))
+                            )
+                        }
+                        Icon(
+                            imageVector = if (isSelected) {
+                                Icons.Default.CheckCircle
+                            } else {
+                                Icons.Default.RadioButtonUnchecked
+                            },
+                            contentDescription = if (isSelected) "Selected" else "Not selected",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(26.dp)
+                        )
+                    }
+                }
 
                 Spacer(Modifier.size(12.dp))
 

@@ -456,6 +456,7 @@ fun DownloadsScreen(
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
                                         isSelected = isSelected,
+                                        selectionActive = isSelectionMode,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
                                             if (isSelectionMode) {
@@ -502,6 +503,7 @@ fun DownloadsScreen(
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
                                         isSelected = isSelected,
+                                        selectionActive = isSelectionMode,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
                                             if (isSelectionMode) {
@@ -564,6 +566,7 @@ fun DownloadsScreen(
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
                                         isSelected = isSelected,
+                                        selectionActive = isSelectionMode,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
                                             if (isSelectionMode) {
