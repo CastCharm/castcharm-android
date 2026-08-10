@@ -175,9 +175,12 @@ class LoginViewModel : ViewModel() {
 
     /**
      * Shared tail of both flows: persist the URL, enrol an API key, mark the
-     * UI as done. skipCredentialsCall exists only so the log line above is
-     * accurate — the actual credentials call has already happened by the time
-     * we get here in the credentials flow.
+     * UI as done.
+     *
+     * skipCredentialsCall is true when the server let us in without a password —
+     * either it has no password at all, or it already recognised our stored
+     * credential. It is false only when the user actually had to type a password,
+     * which is the signal that the stored key was rejected and needs replacing.
      */
     private suspend fun finishLogin(serverUrl: String, skipCredentialsCall: Boolean) {
         // Persist the URL so it can be restored on next launch and used
@@ -190,12 +193,15 @@ class LoginViewModel : ViewModel() {
         // never gets logged out by a cookie quietly reaching its expiry.
         // Best-effort — on an older server this is a no-op and the app
         // simply carries on using the cookie.
-        ensureApiKey(CastCharmApp.instance, force = true)
+        //
+        // force only when a password was actually needed, which means the stored
+        // key was rejected (revoked server-side) and has to be replaced. If the
+        // server already recognised us, the existing key is fine — forcing here
+        // would mint a duplicate and strand the old one in the user's client list.
+        // That path is reachable now that "Back to Login" on the offline screen
+        // keeps credentials instead of wiping them.
+        ensureApiKey(CastCharmApp.instance, force = !skipCredentialsCall)
 
         _uiState.value = _uiState.value.copy(isLoading = false, isLoggedIn = true)
-        // skipCredentialsCall is unused at runtime; kept as a parameter so future
-        // callers can be explicit about which path they came from.
-        @Suppress("UNUSED_PARAMETER")
-        skipCredentialsCall
     }
 }

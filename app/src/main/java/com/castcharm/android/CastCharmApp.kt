@@ -80,6 +80,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
             get() = appSessionManager.isOfflineMode
 
         fun enterOfflineMode() = appSessionManager.enterOfflineMode()
+        fun returnToLoginScreen() = appSessionManager.returnToLoginScreen()
         fun enterOnlineMode() = appSessionManager.enterOnlineMode()
         suspend fun refreshSessionState() = appSessionManager.refreshSessionState()
         suspend fun tryReconnectInPlace() = appSessionManager.tryReconnectInPlace()

@@ -125,6 +125,12 @@ class AppSessionManager(
     @Volatile
     private var lastServerUnreachableEmissionAtMs: Long = 0L
 
+    // Mirror of the hasAuthenticatedBefore preference. enterOfflineMode() runs from
+    // a click handler and cannot suspend to read DataStore, so the value is cached
+    // here whenever it is read or written.
+    @Volatile
+    private var hasAuthenticatedBeforeCached: Boolean = false
+
     // Tuning constants for the failure-window debounce.
     private val failureWindowMs = 8_000L       // window in which failures are counted
     private val emissionCooldownMs = 25_000L   // minimum gap between ServerUnreachable events
@@ -137,17 +143,42 @@ class AppSessionManager(
         _reconnectErrorMessage.value = null
     }
 
-    // Switch to offline mode: stop the failure counter (no point counting failures
-    // when we're already offline), and promote OfflineAvailable → LoggedIn so the
-    // main scaffold becomes visible (the offline scaffold panels replace server data).
+    // Switch to offline mode and show the main scaffold.
+    //
+    // The promotion to LoggedIn is deliberately unconditional (given the user has
+    // signed in at some point). It used to fire only when authState was *exactly*
+    // OfflineAvailable, which meant anything that moved the state in the gap
+    // between the user tapping "Go Offline" and this running — an Activity
+    // recreation resetting it to Checking, or a late 401 setting NotLoggedIn —
+    // left connectivity OFFLINE while the auth state stayed put. The result was
+    // the login screen on a device with no working network: the tap appeared to
+    // do nothing, because there was nothing in the expected state to promote.
+    //
+    // Going offline with a credential the server would have rejected is fine: the
+    // rejection only matters online, and the next reconnect re-checks it.
     fun enterOfflineMode() {
         _connectivityMode.value = AppConnectivityMode.OFFLINE
         clearReconnectError()
         resetTransientFailureTracking()
 
-        if (_authState.value is AppAuthState.OfflineAvailable) {
+        if (hasAuthenticatedBeforeCached) {
             _authState.value = AppAuthState.LoggedIn
         }
+    }
+
+    // Return to the login screen WITHOUT destroying this device's credentials.
+    //
+    // Used by "Back to Login" on the offline entry screen. That button used to call
+    // logoutAndForgetSession(), so backing out of a transient network blip wiped the
+    // API key, the cookies and the hasAuthenticatedBefore flag — and because the
+    // server was unreachable at that exact moment, the key could not be revoked
+    // server-side either, stranding it in the user's client list. Signing out for
+    // real is still available from Settings (onChangeServer).
+    fun returnToLoginScreen() {
+        enterOnlineMode()
+        _authState.value = AppAuthState.NotLoggedIn
+        clearReconnectError()
+        resetTransientFailureTracking()
     }
 
     // Switch to online mode. Promotes OfflineAvailable → LoggedIn so the normal
@@ -185,9 +216,7 @@ class AppSessionManager(
                 _authState.value = AppAuthState.LoggedIn
                 // Persist the fact that login succeeded so future unreachable events
                 // can offer OfflineAvailable instead of dropping to NotLoggedIn.
-                appContext.dataStore.edit { prefs ->
-                    prefs[hasAuthenticatedBeforeKey] = true
-                }
+                setHasAuthenticatedBefore(true)
                 enqueueImmediateSync()
             }
 
@@ -237,9 +266,7 @@ class AppSessionManager(
                     // any offline progress changes to the server.
                     enterOnlineMode()
                     _authState.value = AppAuthState.LoggedIn
-                    appContext.dataStore.edit { prefs ->
-                        prefs[hasAuthenticatedBeforeKey] = true
-                    }
+                    setHasAuthenticatedBefore(true)
                     enqueueImmediateSync()
                 }
 
@@ -271,9 +298,7 @@ class AppSessionManager(
     }
 
     suspend fun completeLogin() {
-        appContext.dataStore.edit { prefs ->
-            prefs[hasAuthenticatedBeforeKey] = true
-        }
+        setHasAuthenticatedBefore(true)
         enterOnlineMode()
         _authState.value = AppAuthState.LoggedIn
         clearReconnectError()
@@ -309,9 +334,7 @@ class AppSessionManager(
         AuthStore.clear(appContext)
         CastCharmApp.apiClient.clearCookies()
         enterOnlineMode()
-        appContext.dataStore.edit { prefs ->
-            prefs[hasAuthenticatedBeforeKey] = false
-        }
+        setHasAuthenticatedBefore(false)
         _authState.value = AppAuthState.NotLoggedIn
         _usingFallbackCookieAuth.value = false
         clearReconnectError()
@@ -366,7 +389,18 @@ class AppSessionManager(
     // the credential is still present but the server rejected it — and emits
     // AuthInvalid so the UI can show a "please log in again" snackbar.
     fun reportAuthInvalid() {
-        enterOnlineMode()
+        // Offline mode is an explicit user decision, so a 401 must not undo it.
+        // Requests that were already in flight when the user tapped "Go Offline"
+        // land afterwards, and this used to drag them straight back online and on
+        // to the login screen. There is also nothing useful to do about a rejected
+        // credential while offline — the next reconnect re-checks it anyway.
+        if (isOfflineMode) {
+            Log.i("AppSessionManager", "Ignoring 401 while in offline mode")
+            return
+        }
+        // Note: no enterOnlineMode() here. The mode is already ONLINE at this point,
+        // and calling it would also promote OfflineAvailable → LoggedIn, briefly
+        // showing the main scaffold before the line below drops to the login screen.
         _authState.value = AppAuthState.NotLoggedIn
         _reconnectInFlight.value = false
         // The banner is meaningless without a session; clearing it means a
@@ -419,10 +453,18 @@ class AppSessionManager(
     // Reads the hasAuthenticatedBefore flag. Defaults to false on read failure.
     private suspend fun loadHasAuthenticatedBefore(): Boolean {
         return try {
-            appContext.dataStore.data.first()[hasAuthenticatedBeforeKey] ?: false
+            (appContext.dataStore.data.first()[hasAuthenticatedBeforeKey] ?: false)
+                .also { hasAuthenticatedBeforeCached = it }
         } catch (_: Exception) {
             false
         }
+    }
+
+    // Single place that records "this device has signed in successfully", so the
+    // persisted flag and its in-memory mirror can never drift apart.
+    private suspend fun setHasAuthenticatedBefore(value: Boolean) {
+        hasAuthenticatedBeforeCached = value
+        appContext.dataStore.edit { prefs -> prefs[hasAuthenticatedBeforeKey] = value }
     }
 
     // Attempts to reach the server and check auth status. Initializing the ApiClient

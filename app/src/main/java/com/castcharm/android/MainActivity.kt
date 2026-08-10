@@ -389,11 +389,13 @@ fun CastCharmNavigation() {
                         hideOfflinePrompt()
                         CastCharmApp.enterOfflineMode()
                     },
+                    // Non-destructive: returns to the login screen but keeps this
+                    // device's API key and cookies. Signing out for real lives in
+                    // Settings (onChangeServer) — backing out of a temporary network
+                    // problem should not cost the user their credentials.
                     onBackToLogin = {
-                        scope.launch {
-                            hideOfflinePrompt()
-                            CastCharmApp.logoutAndForgetSession()
-                        }
+                        hideOfflinePrompt()
+                        CastCharmApp.returnToLoginScreen()
                     }
                 )
             }
@@ -684,7 +686,11 @@ fun MainScaffold(
                     composable("dashboard") { backStackEntry ->
                         val dashVm: DashboardViewModel = viewModel()
 
-                        OnScreenResumed(backStackEntry.lifecycle) { dashVm.refresh() }
+                        val offlineNowDash by rememberUpdatedState(isOfflineMode)
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNowDash) dashVm.refresh()
+                        }
+                        OnReturnedOnline(isOfflineMode) { dashVm.refresh() }
 
                         DashboardScreen(
                             viewModel = dashVm,

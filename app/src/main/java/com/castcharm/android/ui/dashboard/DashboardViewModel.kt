@@ -183,6 +183,14 @@ class DashboardViewModel : ViewModel() {
     }
 
     fun refresh() {
+        // Belt-and-braces alongside the caller's guard: every other ViewModel
+        // refuses to hit the network while offline, and this one used to be the
+        // exception. In offline mode it would set isRefreshing, fire a full set of
+        // API calls at an unreachable server on every resume, and wait for them all
+        // to time out — a real contributor to the app feeling sluggish after
+        // losing connectivity.
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return
+
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
