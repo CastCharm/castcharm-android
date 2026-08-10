@@ -129,7 +129,15 @@ fun FeedListScreen(
                         )
                     }
                     if (!isOfflineMode) {
-                        if (uiState.isSyncing || uiState.syncingFeedIds.isNotEmpty()) {
+                        // Background activity — a routine refresh as well as a sync —
+                        // is reported here rather than over the content. The grid is
+                        // already populated during a refresh, so a large spinner adds
+                        // nothing and has nowhere to sit that isn't on top of, or
+                        // behind, the cards.
+                        if (uiState.isSyncing ||
+                            uiState.syncingFeedIds.isNotEmpty() ||
+                            (uiState.isRefreshing && !uiState.isPullRefreshing)
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(40.dp)
@@ -139,7 +147,10 @@ fun FeedListScreen(
                                 CircularProgressIndicator(
                                     modifier = Modifier
                                         .size(18.dp)
-                                        .semantics { contentDescription = "Syncing feeds" },
+                                        .semantics {
+                                            contentDescription =
+                                                if (uiState.isSyncing) "Syncing feeds" else "Refreshing"
+                                        },
                                     strokeWidth = 2.dp
                                 )
                             }
@@ -187,17 +198,11 @@ fun FeedListScreen(
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding()),
         ) {
-            // An automatic refresh (arriving at the tab, or coming back online) gets
-            // a centred spinner instead. Suppressed while the skeletons are up, since
-            // those already say "loading" and two indicators at once reads as a bug.
-            if (uiState.isRefreshing && !uiState.isPullRefreshing && uiState.feeds.isNotEmpty()) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .semantics { contentDescription = "Loading podcasts" }
-                )
-            }
-
+            // No centred spinner here on purpose. With the grid already populated it
+            // rendered behind the cards, and a full-page indicator over content the
+            // user can already see and scroll is noise. Loading from empty is covered
+            // by the skeleton cards below; background refreshes show the small
+            // top-bar spinner instead.
             when {
                 uiState.isInitialLoading && uiState.feeds.isEmpty() -> {
                     LazyVerticalGrid(

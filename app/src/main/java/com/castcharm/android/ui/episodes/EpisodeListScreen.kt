@@ -41,6 +41,7 @@ import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
@@ -90,7 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.ui.playlists.AddToPlaylistSheet
-import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.ProvideSelectionActions
 import com.castcharm.android.ui.shared_components.SelectionAction
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
@@ -255,6 +256,61 @@ fun EpisodeListScreen(
         enabled = !isOfflineMode
     )
 
+    // Whether "mark played" or "mark unplayed" is offered depends on the current
+    // state of the selection — offering whichever change would actually alter the
+    // picked rows.
+    val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
+        uiState.episodes.filter { it.id in uiState.selectedEpisodes }.all { it.played }
+
+    // Entering selection mode resets the filter to ALL (see the LaunchedEffect
+    // above), so the loaded list and the visible list are the same set here and
+    // "everything is selected" is unambiguous.
+    val allSelected = uiState.episodes.isNotEmpty() &&
+        uiState.episodes.all { it.id in uiState.selectedEpisodes }
+
+    // Hands these to MainScaffold, which shows them in place of the tab bar.
+    ProvideSelectionActions(
+        active = isSelectionMode,
+        allSelected,
+        allSelectedPlayed,
+        anySelectedDownloaded,
+    ) {
+        listOf(
+            // Flips to "Select none" once everything is picked — an always-on
+            // "Select all" is a dead button at that point. Deselecting everything
+            // leaves the selection empty, which is what ends selection mode, so this
+            // doubles as a second way out alongside the X in the top bar.
+            SelectionAction(
+                icon = if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
+                label = if (allSelected) "Select none" else "Select all",
+                onClick = {
+                    if (allSelected) viewModel.clearSelection() else viewModel.selectAll()
+                }
+            ),
+            SelectionAction(
+                icon = if (allSelectedPlayed) {
+                    Icons.Default.RadioButtonUnchecked
+                } else {
+                    Icons.Default.CheckCircle
+                },
+                label = if (allSelectedPlayed) "Mark unplayed" else "Mark played",
+                onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) }
+            ),
+            SelectionAction(
+                icon = Icons.Default.PhoneAndroid,
+                label = "Download",
+                onClick = { showDownloadConfirm = true }
+            ),
+            SelectionAction(
+                icon = Icons.Default.DeleteForever,
+                label = "Delete files",
+                onClick = { showDeleteDownloadsConfirm = true },
+                enabled = anySelectedDownloaded,
+                destructive = true
+            ),
+        )
+    }
+
     val topBarTitle = when {
         isSelectionMode -> "${uiState.selectedEpisodes.size} selected"
         isOfflineMode && feed != null -> feed.title
@@ -330,47 +386,6 @@ fun EpisodeListScreen(
                     }
                 }
             )
-        },
-        bottomBar = {
-            if (isSelectionMode) {
-                // Whether "mark played" or "mark unplayed" is offered depends on the
-                // current state of the selection — showing whichever change would
-                // actually alter the picked rows.
-                val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
-                    uiState.episodes.filter { it.id in uiState.selectedEpisodes }
-                        .all { it.played }
-
-                SelectionActionBar(
-                    actions = listOf(
-                        SelectionAction(
-                            icon = Icons.Default.SelectAll,
-                            label = "Select all",
-                            onClick = { viewModel.selectAll() }
-                        ),
-                        SelectionAction(
-                            icon = if (allSelectedPlayed) {
-                                Icons.Default.RadioButtonUnchecked
-                            } else {
-                                Icons.Default.CheckCircle
-                            },
-                            label = if (allSelectedPlayed) "Mark unplayed" else "Mark played",
-                            onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) }
-                        ),
-                        SelectionAction(
-                            icon = Icons.Default.PhoneAndroid,
-                            label = "Download",
-                            onClick = { showDownloadConfirm = true }
-                        ),
-                        SelectionAction(
-                            icon = Icons.Default.DeleteForever,
-                            label = "Delete files",
-                            onClick = { showDeleteDownloadsConfirm = true },
-                            enabled = anySelectedDownloaded,
-                            destructive = true
-                        ),
-                    )
-                )
-            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->

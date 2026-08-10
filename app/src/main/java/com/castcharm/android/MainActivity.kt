@@ -48,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -105,6 +106,9 @@ import com.castcharm.android.ui.settings.SettingsScreen
 import com.castcharm.android.ui.settings.SettingsViewModel
 import com.castcharm.android.ui.theme.CastCharmTheme
 import com.castcharm.android.ui.search.SearchScreen
+import com.castcharm.android.ui.shared_components.SelectionBarHost
+import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.LocalSelectionBar
 import com.castcharm.android.ui.shared_components.ReconnectOutlinedButton
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodes
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesFromDashboard
@@ -667,6 +671,12 @@ fun MainScaffold(
                 !playbackUiState.title.isNullOrBlank() &&
                 !isOnPlayerRoute
 
+    // Screens inside the NavHost publish their multi-select actions here via
+    // ProvideSelectionActions; the bottom bar below renders them in place of the
+    // tab bar while a selection is active.
+    val selectionBarHost = remember { SelectionBarHost() }
+
+    CompositionLocalProvider(LocalSelectionBar provides selectionBarHost) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -947,6 +957,15 @@ fun MainScaffold(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
 
+                    // While a screen has bulk actions to offer, they take over this
+                    // bar rather than appearing as a second bar stacked above it.
+                    // Leaving tab navigation live during multi-select would let the
+                    // user wander off mid-selection anyway, and the top bar keeps an
+                    // X to exit, so nothing becomes unreachable.
+                    val selectionActions = selectionBarHost.actions
+                    if (selectionActions.isNotEmpty()) {
+                        SelectionActionBar(actions = selectionActions)
+                    } else {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                         bottomNavItems.filter { screen ->
                             screen !is Screen.Playlists || enablePlaylists
@@ -1001,6 +1020,7 @@ fun MainScaffold(
                             )
                         }
                     }
+                    }
                 }
             }
         }
@@ -1011,6 +1031,7 @@ fun MainScaffold(
                 .align(Alignment.BottomCenter)
                 .padding(bottom = if (showBottomBar) 88.dp else 24.dp)
         )
+    }
     }
 }
 

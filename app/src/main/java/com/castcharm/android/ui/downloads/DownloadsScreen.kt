@@ -79,7 +79,7 @@ import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.download.BandwidthTracker
 import com.castcharm.android.ui.settings.formatBytes
-import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.ProvideSelectionActions
 import com.castcharm.android.ui.shared_components.SelectionAction
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.EpisodeCard
@@ -115,6 +115,18 @@ fun DownloadsScreen(
 
     LaunchedEffect(isOfflineMode, refreshToken) {
         viewModel.onScreenVisible(isOfflineMode = isOfflineMode)
+    }
+
+    // Hands the bulk action to MainScaffold, which shows it in place of the tab bar.
+    ProvideSelectionActions(active = isSelectionMode) {
+        listOf(
+            SelectionAction(
+                icon = Icons.Default.Delete,
+                label = "Delete from device",
+                onClick = { showDeleteSelectedConfirm = true },
+                destructive = true
+            ),
+        )
     }
 
     if (showDeleteSelectedConfirm) {
@@ -276,20 +288,6 @@ fun DownloadsScreen(
                     }
                 }
             )
-        },
-        bottomBar = {
-            if (isSelectionMode) {
-                SelectionActionBar(
-                    actions = listOf(
-                        SelectionAction(
-                            icon = Icons.Default.Delete,
-                            label = "Delete from device",
-                            onClick = { showDeleteSelectedConfirm = true },
-                            destructive = true
-                        ),
-                    )
-                )
-            }
         }
     ) { padding ->
         Column(
