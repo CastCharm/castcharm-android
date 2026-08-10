@@ -22,6 +22,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Deselect
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.foundation.layout.width
+import com.castcharm.android.ui.shared_components.ProvideSelectionActions
+import com.castcharm.android.ui.shared_components.SelectionAction
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.MoreVert
@@ -68,6 +87,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.FolderConflict
+import com.castcharm.android.data.api.models.feedCoverUrl
 import com.castcharm.android.data.db.entities.FeedEntity
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
@@ -91,6 +112,8 @@ fun FeedListScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showMenu by remember { mutableStateOf(false) }
     var showAddFeedDialog by remember { mutableStateOf(false) }
+    var pendingFeedUrl by remember { mutableStateOf("") }
+    var pendingDownloadAll by remember { mutableStateOf(false) }
 
     ConsumeSnackbarMessage(
         message = uiState.errorMessage,
@@ -105,17 +128,117 @@ fun FeedListScreen(
     )
 
     if (showAddFeedDialog) {
-        AddFeedDialog(
-            isLoading = uiState.isAddingFeed,
-            onConfirm = { url -> viewModel.addFeed(url) { showAddFeedDialog = false } },
-            onDismiss = { if (!uiState.isAddingFeed) showAddFeedDialog = false }
+        val conflict = uiState.addFeedFolderConflict
+        if (conflict != null) {
+            // The add was refused because the folder is occupied. Hand the decision
+            // back rather than picking for them.
+            FolderConflictDialog(
+                conflict = conflict,
+                isLoading = uiState.isAddingFeed,
+                errorMessage = uiState.addFeedError,
+                onUseDifferentName = { newName ->
+                    viewModel.addFeed(
+                        url = pendingFeedUrl,
+                        downloadAll = pendingDownloadAll,
+                        folderNameOverride = newName,
+                    ) { showAddFeedDialog = false }
+                },
+                onUseExistingFolder = {
+                    viewModel.addFeed(
+                        url = pendingFeedUrl,
+                        downloadAll = pendingDownloadAll,
+                        allowExistingFolder = true,
+                    ) { showAddFeedDialog = false }
+                },
+                onBack = { viewModel.clearAddFeedFolderConflict() }
+            )
+        } else {
+            AddFeedDialog(
+                isLoading = uiState.isAddingFeed,
+                errorMessage = uiState.addFeedError,
+                onErrorDismissed = { viewModel.clearAddFeedError() },
+                onConfirm = { url, downloadAll ->
+                    // Remembered so the conflict prompt can retry the same request
+                    // without making the user retype the URL.
+                    pendingFeedUrl = url
+                    pendingDownloadAll = downloadAll
+                    viewModel.addFeed(url, downloadAll) { showAddFeedDialog = false }
+                },
+                onDismiss = { if (!uiState.isAddingFeed) showAddFeedDialog = false }
+            )
+        }
+    }
+
+    val isSelectionMode = uiState.selectedFeeds.isNotEmpty()
+    // Feeds being deleted are inert, so they are excluded from "all" in both
+    // directions — selectAllFeeds() skips them, and this must agree or the label
+    // could never flip to "Select none" while a deletion is in flight.
+    val selectableFeeds = uiState.feeds.filterNot { it.id in uiState.deletingFeeds }
+    val allSelected = selectableFeeds.isNotEmpty() &&
+        selectableFeeds.all { it.id in uiState.selectedFeeds }
+    var showDeleteFeedsConfirm by remember { mutableStateOf(false) }
+
+    if (showDeleteFeedsConfirm) {
+        DeleteFeedsDialog(
+            feedTitles = uiState.feeds
+                .filter { it.id in uiState.selectedFeeds }
+                .map { it.title ?: it.url },
+            onConfirm = { deleteFiles ->
+                showDeleteFeedsConfirm = false
+                viewModel.deleteSelectedFeeds(deleteFiles)
+            },
+            onDismiss = { showDeleteFeedsConfirm = false }
+        )
+    }
+
+    ProvideSelectionActions(
+        active = isSelectionMode,
+        allSelected,
+        uiState.bulkActionInFlight,
+    ) {
+        listOf(
+            SelectionAction(
+                icon = if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
+                label = if (allSelected) "Select none" else "Select all",
+                onClick = {
+                    if (allSelected) viewModel.clearFeedSelection() else viewModel.selectAllFeeds()
+                }
+            ),
+            SelectionAction(
+                icon = Icons.Default.Refresh,
+                label = "Sync",
+                onClick = { viewModel.syncSelectedFeeds() },
+                enabled = !uiState.bulkActionInFlight
+            ),
+            SelectionAction(
+                icon = Icons.Default.DeleteForever,
+                label = "Delete",
+                onClick = { showDeleteFeedsConfirm = true },
+                enabled = !uiState.bulkActionInFlight,
+                destructive = true
+            ),
         )
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { AppTopBarTitle(text = "Podcasts") },
+                title = {
+                    AppTopBarTitle(
+                        text = if (isSelectionMode) {
+                            "${uiState.selectedFeeds.size} selected"
+                        } else {
+                            "Podcasts"
+                        }
+                    )
+                },
+                navigationIcon = {
+                    if (isSelectionMode) {
+                        IconButton(onClick = { viewModel.clearFeedSelection() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        }
+                    }
+                },
                 actions = {
                     if (onSearchClick != null) {
                         IconButton(onClick = onSearchClick) {
@@ -244,7 +367,17 @@ fun FeedListScreen(
                             FeedCard(
                                 feed = feed,
                                 baseUrl = baseUrl,
-                                onClick = { onNavigateToEpisodes(feed.id) }
+                                isSelected = feed.id in uiState.selectedFeeds,
+                                selectionActive = isSelectionMode,
+                                isDeleting = feed.id in uiState.deletingFeeds,
+                                onClick = {
+                                    if (isSelectionMode) {
+                                        viewModel.toggleFeedSelection(feed.id)
+                                    } else {
+                                        onNavigateToEpisodes(feed.id)
+                                    }
+                                },
+                                onLongPress = { viewModel.toggleFeedSelection(feed.id) }
                             )
                         }
                     }
@@ -252,6 +385,112 @@ fun FeedListScreen(
             }
         }
     }
+}
+
+/**
+ * Confirmation for deleting podcasts from the server.
+ *
+ * Worth being blunt in this dialog. Everywhere else in the app "delete" means "free
+ * up space on this phone" — the Downloads tab, the episode list, the storage quota
+ * all operate on local files. This one does something categorically different: it
+ * unsubscribes the server itself, for every device, and cannot be undone from here.
+ * The wording, the icon and the button label all say "server" for that reason, and
+ * the feeds being removed are listed by name so a mis-tap on the wrong card is
+ * visible before it is irreversible.
+ */
+@Composable
+private fun DeleteFeedsDialog(
+    feedTitles: List<String>,
+    onConfirm: (deleteFiles: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var deleteFiles by remember { mutableStateOf(false) }
+    val count = feedTitles.size
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = {
+            Text("Remove ${if (count == 1) "podcast" else "$count podcasts"} from the server?")
+        },
+        text = {
+            Column {
+                Text(
+                    text = "This unsubscribes your CastCharm server, not just this phone. " +
+                        "The ${if (count == 1) "podcast" else "podcasts"} and all episode " +
+                        "history will be gone for every device, and this cannot be undone " +
+                        "from the app.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                // Cap the list so selecting 40 podcasts doesn't produce a dialog
+                // taller than the screen with the buttons pushed off the bottom.
+                feedTitles.take(6).forEach { title ->
+                    Text(
+                        text = "• $title",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (count > 6) {
+                    Text(
+                        text = "…and ${count - 6} more",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { deleteFiles = !deleteFiles }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = deleteFiles, onCheckedChange = { deleteFiles = it })
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "Also erase the downloaded audio files from the server's disk",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (!deleteFiles) {
+                    Text(
+                        text = "Leaving this unchecked keeps the audio files on the server, " +
+                            "but they will no longer belong to any podcast.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(deleteFiles) },
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Delete from server")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 @Composable
@@ -277,22 +516,50 @@ private fun OfflineFeedsContent(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FeedCard(
     feed: FeedEntity,
     baseUrl: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    isSelected: Boolean = false,
+    selectionActive: Boolean = false,
+    isDeleting: Boolean = false,
+    onLongPress: (() -> Unit)? = null,
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() },
-        shape = RoundedCornerShape(12.dp)
+            // A feed whose deletion is in flight accepts no input at all — it cannot
+            // be opened, and cannot be picked up into a new selection.
+            .combinedClickable(
+                enabled = !isDeleting,
+                onClick = onClick,
+                onLongClick = onLongPress
+            ),
+        shape = RoundedCornerShape(12.dp),
+        // Same three-signal treatment as EpisodeCard: badge, border and elevation,
+        // so selection never depends on telling two similar backgrounds apart.
+        colors = if (isSelected) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        } else {
+            CardDefaults.cardColors()
+        },
+        border = if (isSelected) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
+        elevation = if (isSelected) {
+            CardDefaults.cardElevation(defaultElevation = 6.dp)
+        } else {
+            CardDefaults.cardElevation()
+        }
     ) {
         Column {
             val rawImageUrl = feed.custom_image_url
                 ?: feed.image_url
-                ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${feed.id}/cover.jpg" else null
+                ?: feedCoverUrl(baseUrl, feed.id, feed.url)
 
             Box {
                 PlaceholderArtwork(
@@ -312,6 +579,62 @@ fun FeedCard(
                             .padding(8.dp)
                     ) {
                         Text(feed.unplayed_count.toString())
+                    }
+                }
+
+                // Slated for deletion: black scrim plus a bin, matching the web UI.
+                // Drawn last so it covers the artwork, the unplayed badge and any
+                // selection mark — the card reads as "on its way out" and nothing
+                // else about it is actionable.
+                if (isDeleting) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(Color.Black.copy(alpha = 0.55f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Deleting",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                }
+
+                // Selection mark, on an opaque disc so its contrast never depends
+                // on the cover art underneath. Bottom-start keeps it clear of the
+                // unplayed-count badge in the opposite corner.
+                if (selectionActive && !isDeleting) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isSelected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Black.copy(alpha = 0.6f)
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isSelected) {
+                                Icons.Default.Check
+                            } else {
+                                Icons.Default.RadioButtonUnchecked
+                            },
+                            contentDescription = if (isSelected) "Selected" else "Not selected",
+                            tint = if (isSelected) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                Color.White
+                            },
+                            modifier = Modifier.size(if (isSelected) 20.dp else 30.dp)
+                        )
                     }
                 }
             }
@@ -391,13 +714,113 @@ private fun FeedCardSkeleton() {
     }
 }
 
+/**
+ * Shown when the server refuses an add because the podcast's folder already exists
+ * and has files in it — almost always left over from a podcast that was removed
+ * without deleting its audio.
+ *
+ * Deliberately offers both ways out and commits to neither. Silently adopting the
+ * folder mixes two podcasts' files together and lets the new one inherit the old
+ * one's cover art; silently deleting what's there would destroy audio the user chose
+ * to keep. Only they know which it should be.
+ */
+@Composable
+private fun FolderConflictDialog(
+    conflict: FolderConflict,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onUseDifferentName: (String) -> Unit,
+    onUseExistingFolder: () -> Unit,
+    onBack: () -> Unit,
+) {
+    var name by rememberSaveable(conflict.folderName) { mutableStateOf(conflict.folderName) }
+    val canSubmit = name.isNotBlank() && name.trim() != conflict.folderName && !isLoading
+
+    AlertDialog(
+        onDismissRequest = { if (!isLoading) onBack() },
+        icon = {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = { Text("Folder already exists") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "A folder named \"${conflict.folderName}\" already exists and " +
+                        "contains ${conflict.fileCount} file" +
+                        (if (conflict.fileCount == 1) "" else "s") +
+                        ". It's most likely left over from a podcast that was removed " +
+                        "without deleting its files.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                conflict.folderPath?.let { path ->
+                    Text(
+                        text = path,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "Give this podcast a different folder name, or use the existing " +
+                        "folder anyway — its files will be mixed in with this podcast's.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Folder name") },
+                    singleLine = true,
+                    enabled = !isLoading,
+                    isError = errorMessage != null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Only the folder name changes — the podcast keeps its title " +
+                        "from the feed.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onUseDifferentName(name.trim()) }, enabled = canSubmit) {
+                Text("Use this name")
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onBack, enabled = !isLoading) { Text("Back") }
+                TextButton(onClick = onUseExistingFolder, enabled = !isLoading) {
+                    Text("Use existing folder")
+                }
+            }
+        }
+    )
+}
+
 @Composable
 private fun AddFeedDialog(
     isLoading: Boolean,
-    onConfirm: (String) -> Unit,
+    errorMessage: String?,
+    onErrorDismissed: () -> Unit,
+    onConfirm: (url: String, downloadAll: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     var url by rememberSaveable { mutableStateOf("") }
+    // Off by default. On a big podcast this is potentially tens of gigabytes on the
+    // server, and the scale of it is invisible from a phone.
+    var downloadAll by rememberSaveable { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val canSubmit = url.isNotBlank() && !isLoading
 
@@ -415,7 +838,11 @@ private fun AddFeedDialog(
                 )
                 OutlinedTextField(
                     value = url,
-                    onValueChange = { url = it },
+                    onValueChange = {
+                        url = it
+                        // The previous reason no longer applies once the URL changes.
+                        if (errorMessage != null) onErrorDismissed()
+                    },
                     label = { Text("Feed URL") },
                     placeholder = { Text("https://example.com/feed.rss") },
                     singleLine = true,
@@ -425,17 +852,63 @@ private fun AddFeedDialog(
                         imeAction = ImeAction.Go
                     ),
                     keyboardActions = KeyboardActions(
-                        onGo = { if (canSubmit) onConfirm(url) }
+                        onGo = { if (canSubmit) onConfirm(url, downloadAll) }
                     ),
+                    isError = errorMessage != null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(focusRequester)
                 )
+
+                if (errorMessage != null) {
+                    // Shown here rather than as a snackbar: a snackbar renders behind
+                    // this dialog, and the dialog stays open on failure so the user
+                    // can fix the URL without retyping it.
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = !isLoading) { downloadAll = !downloadAll },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = downloadAll,
+                        onCheckedChange = { downloadAll = it },
+                        enabled = !isLoading
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Column {
+                        Text(
+                            "Download the back catalogue",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        // Spelling out both halves: what it downloads (the existing
+                        // episodes, on the SERVER — not this phone) and what happens
+                        // without it (new episodes still arrive on their own), since
+                        // the difference between the two is the whole decision.
+                        Text(
+                            "Queues every existing episode onto your server once the " +
+                                "feed first syncs. New episodes download on their own " +
+                                "either way.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(url) },
+                onClick = { onConfirm(url, downloadAll) },
                 enabled = canSubmit
             ) {
                 if (isLoading) {

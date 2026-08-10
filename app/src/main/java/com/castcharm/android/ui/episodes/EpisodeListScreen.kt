@@ -90,6 +90,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.models.feedCoverUrl
 import com.castcharm.android.ui.playlists.AddToPlaylistSheet
 import com.castcharm.android.ui.shared_components.ProvideSelectionActions
 import com.castcharm.android.ui.shared_components.SelectionAction
@@ -445,7 +446,7 @@ fun EpisodeListScreen(
                                 feedTitle = feed.title,
                                 feedDescription = feed.description,
                                 imageUrl = feed.custom_image_url ?: feed.image_url
-                                ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${feed.id}/cover.jpg" else null,
+                                ?: feedCoverUrl(baseUrl, feed.id, feed.url),
                                 episodeCount = feed.episode_count,
                                 unplayedCount = feed.unplayed_count,
                                 onPlayFeed = if (!isOfflineMode && feed.unplayed_count > 0) {

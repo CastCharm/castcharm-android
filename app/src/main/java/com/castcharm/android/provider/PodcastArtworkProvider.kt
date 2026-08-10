@@ -14,8 +14,10 @@ import androidx.core.content.ContextCompat
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.R
+import coil.memory.MemoryCache
 import com.castcharm.android.data.api.ApiKeyInterceptor
 import com.castcharm.android.data.api.PersistentCookieJar
+import com.castcharm.android.data.api.models.feedCoverUrl
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
 import kotlinx.coroutines.flow.first
@@ -45,13 +47,55 @@ class PodcastArtworkProvider : ContentProvider() {
         const val TAG = "PodcastArtworkProvider"
         const val CACHE_DIR_NAME = "artwork"
 
+        /**
+         * Cache filename for a feed's artwork, including a token from the feed's RSS
+         * URL. Two different podcasts that end up sharing a recycled feed id get
+         * different files, so neither can serve the other's cover.
+         */
+        fun feedArtworkCacheName(feedId: Int, feedUrl: String?): String {
+            val token = feedUrl?.takeIf { it.isNotBlank() }?.hashCode() ?: 0
+            return "feed_${feedId}_$token.img"
+        }
+
+        /**
+         * Throws away every cached copy of one feed's artwork.
+         *
+         * Needed because the server's feeds table is `INTEGER PRIMARY KEY` without
+         * AUTOINCREMENT, so SQLite recycles ids: delete the most recently added
+         * podcast, subscribe to a different one, and it can be handed the same id.
+         * The cover URL is built purely from that id
+         * (api/feeds/{id}/cover.jpg), so it comes out byte-identical for two
+         * unrelated shows and every cache keyed on it happily serves the old image.
+         *
+         * Both caches have to go: this provider's own file cache (used by Android
+         * Auto) and Coil's memory + disk caches (used by the phone UI).
+         */
+        fun evictFeedArtwork(context: android.content.Context, feedId: Int) {
+            runCatching {
+                val cacheDir = File(context.cacheDir, CACHE_DIR_NAME)
+                // Filenames carry a token, so sweep by prefix rather than guessing it.
+                cacheDir.listFiles { f -> f.name.startsWith("feed_${feedId}_") }
+                    ?.forEach { it.delete() }
+            }.onFailure { Log.w(TAG, "Could not clear artwork file cache for feed $feedId", it) }
+
+            runCatching {
+                val baseUrl = CastCharmApp.apiClient.getBaseUrl()
+                if (baseUrl.isBlank()) return@runCatching
+                val url = "${baseUrl}api/feeds/$feedId/cover.jpg"
+                val loader = CastCharmApp.imageLoader
+                loader.memoryCache?.remove(MemoryCache.Key(url))
+                loader.diskCache?.remove(url)
+            }.onFailure { Log.w(TAG, "Could not clear Coil cache for feed $feedId", it) }
+        }
+
         fun prefetchFeedArtwork(context: android.content.Context, feedId: Int) {
             val cacheDir = File(context.cacheDir, CACHE_DIR_NAME).apply { if (!exists()) mkdirs() }
-            val cacheFile = File(cacheDir, "feed_${feedId}.img")
-            if (cacheFile.exists() && cacheFile.length() > 0) return
             try {
                 val db = AppDatabase.getDatabase(context)
                 val feed = runBlocking { db.feedDao().getFeedOnce(feedId) }
+                // Named after the feed is known — see feedArtworkCacheName.
+                val cacheFile = File(cacheDir, feedArtworkCacheName(feedId, feed?.url))
+                if (cacheFile.exists() && cacheFile.length() > 0) return
                 val episodeWithFeedArt = runBlocking { db.episodeDao().getEpisodeWithFeedImageForFeed(feedId) }
                 val baseUrl = runBlocking {
                     val savedUrl = context.dataStore.data.map { it[stringPreferencesKey("server_url")] }.first()
@@ -60,7 +104,7 @@ class PodcastArtworkProvider : ContentProvider() {
                 val url = feed?.custom_image_url?.takeIf { it.isNotBlank() }
                     ?: feed?.image_url?.takeIf { it.isNotBlank() }
                     ?: episodeWithFeedArt?.feed_image_url?.takeIf { it.isNotBlank() }
-                    ?: if (baseUrl.isNotEmpty()) "${baseUrl}api/feeds/${feedId}/cover.jpg" else null
+                    ?: feedCoverUrl(baseUrl, feedId, feed?.url)
                 if (url != null) {
                     val client = OkHttpClient.Builder()
                         .cookieJar(PersistentCookieJar.getInstance(context))
@@ -153,20 +197,26 @@ class PodcastArtworkProvider : ContentProvider() {
      * Handles feed-level artwork.
      */
     private fun handleFeedArtwork(feedId: Int, cacheDir: File): ParcelFileDescriptor? {
-        val cacheFile = File(cacheDir, "feed_$feedId.img")
-        
+        // The feed has to be read BEFORE the cache filename is chosen: the filename
+        // carries a token derived from the feed's RSS URL, so a recycled feed id
+        // lands on a different file rather than serving the previous podcast's art.
+        // Keying purely on the id, as this did, made the stale image permanent here
+        // even once Coil had been fixed — this path short-circuits on the file
+        // existing and never re-checks the network.
+        val feed = runBlocking { db.feedDao().getFeedOnce(feedId) }
+        val episodeWithFeedArt = runBlocking { db.episodeDao().getEpisodeWithFeedImageForFeed(feedId) }
+        val baseUrl = getBaseUrl()
+
+        val cacheFile = File(cacheDir, feedArtworkCacheName(feedId, feed?.url))
+
         if (cacheFile.exists() && cacheFile.length() > 0) {
             return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
         }
 
-        val feed = runBlocking { db.feedDao().getFeedOnce(feedId) }
-        val episodeWithFeedArt = runBlocking { db.episodeDao().getEpisodeWithFeedImageForFeed(feedId) }
-        val baseUrl = getBaseUrl()
-        
         val url = feed?.custom_image_url?.takeIf { it.isNotBlank() }
             ?: feed?.image_url?.takeIf { it.isNotBlank() }
             ?: episodeWithFeedArt?.feed_image_url?.takeIf { it.isNotBlank() }
-            ?: if (baseUrl.isNotEmpty()) "${baseUrl}api/feeds/$feedId/cover.jpg" else null
+            ?: feedCoverUrl(baseUrl, feedId, feed?.url)
 
         if (url != null && downloadToCache(url, cacheFile)) {
             return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)

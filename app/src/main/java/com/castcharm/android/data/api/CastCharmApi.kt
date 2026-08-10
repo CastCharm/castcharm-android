@@ -95,6 +95,17 @@ interface CastCharmApi {
     @POST("api/feeds/{feed_id}/refresh")
     suspend fun refreshFeed(@Path("feed_id") feedId: Int)
 
+
+    // Removes a podcast and all of its episode records from the SERVER, for every
+    // client. deleteFiles additionally purges the downloaded audio, sidecar XML and
+    // cover art from the server's disk; without it those files are left behind.
+    // There is no undo, and nothing about this is local to the phone.
+    @DELETE("api/feeds/{feed_id}")
+    suspend fun deleteFeed(
+        @Path("feed_id") feedId: Int,
+        @Query("delete_files") deleteFiles: Boolean = false,
+    )
+
     // ---- Episodes -----------------------------------------------------------
     // Cross-feed episode list. status filter is used by the server-side download
     // queue (e.g., status="downloading") when monitoring active server downloads.

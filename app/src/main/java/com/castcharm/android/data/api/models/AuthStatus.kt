@@ -56,7 +56,13 @@ data class ProgressRequest(
 // redirects and detects RSS from podcast page URLs automatically.
 data class AddFeedRequest(
     val url: String,
-    val download_all: Boolean = false
+    val download_all: Boolean = false,
+    // Folder name override. The podcast keeps its real title from the RSS feed;
+    // this only changes the directory the server files it under.
+    val title_override: String? = null,
+    // Only ever true once the user has been shown the folder-already-exists prompt
+    // and has chosen to go ahead with it.
+    val allow_existing_folder: Boolean = false
 )
 
 // GET /api/settings response. Only the fields the Android app uses are mapped;
