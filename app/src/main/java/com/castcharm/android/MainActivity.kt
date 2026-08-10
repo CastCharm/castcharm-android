@@ -56,6 +56,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -542,9 +543,44 @@ fun DownloadIconWithProgress(isDownloading: Boolean) {
     }
 }
 
+/**
+ * Runs [onResume] every time the screen resumes, including the first time it is
+ * shown. This is the *single* place a screen's data load is triggered from.
+ *
+ * Screens used to load twice on arrival: once from the ViewModel's init block and
+ * again from this observer. Two loads land within milliseconds of each other, and
+ * because each flips isRefreshing, the pull-to-refresh indicator would appear to
+ * fire twice when navigating to a tab. The ViewModels no longer self-load, so
+ * arriving at a screen produces exactly one load — from here.
+ *
+ * Relying on this for the first load is safe because a destination always reaches
+ * RESUMED, and LifecycleRegistry replays the upward events into an observer that
+ * registers when the lifecycle is already RESUMED.
+ *
+ * Keyed on the lifecycle alone. Do not add changing values such as isOfflineMode
+ * to the key — re-keying disposes and re-registers the observer, which replays
+ * ON_RESUME and fires a spurious extra load. Read such values through
+ * rememberUpdatedState inside [onResume] instead.
+ */
+@Composable
+private fun OnScreenResumed(
+    lifecycle: Lifecycle,
+    onResume: () -> Unit,
+) {
+    val currentOnResume by rememberUpdatedState(onResume)
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) currentOnResume()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
 // Main scaffold: NavHost + bottom nav bar + mini player bar. Shown when the user
-// is fully logged in. Owns the per-screen ViewModel lifecycle via DisposableEffect
-// observers that trigger refreshes on ON_RESUME.
+// is fully logged in. Each screen's data load is triggered from exactly one place,
+// OnScreenResumed, rather than from both the ViewModel's init and a lifecycle
+// observer — see the note on that function.
 @Composable
 fun MainScaffold(
     navController: androidx.navigation.NavHostController,
@@ -566,7 +602,10 @@ fun MainScaffold(
     val snackbarHostState = remember { SnackbarHostState() }
     // Integer token incremented every time the Downloads tab becomes visible,
     // used to trigger a fresh DownloadsViewModel observation when re-entering.
-    var downloadsRefreshToken by remember { mutableIntStateOf(0) }
+    // Constant now — DownloadsScreen reloads via its own LaunchedEffect when the
+    // composable enters composition. Kept as a parameter so a future caller can
+    // still force a reload by changing it.
+    val downloadsRefreshToken by remember { mutableIntStateOf(0) }
 
     // Forward ShowMessage events from the player (e.g., "Cannot stream offline")
     // to the snackbar host so they appear over the current screen.
@@ -618,22 +657,13 @@ fun MainScaffold(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     // ---- Dashboard route -------------------------------------
-                    // DisposableEffect observes the back-stack entry's lifecycle
-                    // so refresh() is called when the user returns from another tab
-                    // or navigates back from the episode list. The isOfflineMode
-                    // guard prevents network calls while offline.
+                    // The ViewModel collects cached data from the DB in its init;
+                    // OnScreenResumed triggers the server pull, both on first arrival
+                    // and when returning from another tab or the episode list.
                     composable("dashboard") { backStackEntry ->
                         val dashVm: DashboardViewModel = viewModel()
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    dashVm.refresh()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                        OnScreenResumed(backStackEntry.lifecycle) { dashVm.refresh() }
 
                         DashboardScreen(
                             viewModel = dashVm,
@@ -665,15 +695,10 @@ fun MainScaffold(
 
                     composable("feeds") { backStackEntry ->
                         val feedVm: FeedListViewModel = viewModel()
+                        val offlineNow by rememberUpdatedState(isOfflineMode)
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (!isOfflineMode && event == Lifecycle.Event.ON_RESUME) {
-                                    feedVm.refreshFeeds()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNow) feedVm.refreshFeeds()
                         }
 
                         FeedListScreen(
@@ -695,19 +720,18 @@ fun MainScaffold(
 
                     // ---- Downloads route -------------------------------------
                     // No ViewModel at this level — DownloadsScreen manages its own
-                    // ViewModel internally. The refreshToken increment on ON_RESUME
-                    // is passed down to DownloadsScreen so it can re-trigger its
-                    // internal observation when the tab becomes active.
-                    composable("downloads") { backStackEntry ->
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    downloadsRefreshToken++
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                    // ViewModel internally. The refreshToken increment is passed down
+                    // to DownloadsScreen so it can re-trigger its internal observation
+                    // when the user comes back to the tab. DownloadsScreen already
+                    // loads once on first composition via LaunchedEffect(refreshToken),
+                    // so the token must not be bumped on that first pass.
+                    composable("downloads") { _ ->
+                        // No ON_RESUME observer here: DownloadsScreen's own
+                        // LaunchedEffect(isOfflineMode, refreshToken) already runs
+                        // when the composable enters composition, which happens on
+                        // every navigation to this tab. Bumping the token from a
+                        // lifecycle observer as well produced a second load a few
+                        // milliseconds after the first.
 
                         DownloadsScreen(
                             refreshToken = downloadsRefreshToken,
@@ -723,12 +747,11 @@ fun MainScaffold(
                         val settingsVm = viewModel<SettingsViewModel> { SettingsViewModel(storageManager) }
                         val lifecycleOwner = LocalLifecycleOwner.current
 
-                        DisposableEffect(lifecycleOwner) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) settingsVm.reload()
-                            }
-                            lifecycleOwner.lifecycle.addObserver(observer)
-                            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                        // Activity lifecycle, not the back-stack entry: this reloads
+                        // storage figures when the app returns from the background.
+                        // SettingsViewModel already loads in its init block.
+                        OnScreenResumed(lifecycleOwner.lifecycle) {
+                            settingsVm.reload()
                         }
 
                         SettingsScreen(
@@ -765,14 +788,9 @@ fun MainScaffold(
                             EpisodeListViewModel(feedId)
                         }
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (!isOfflineMode && event == Lifecycle.Event.ON_RESUME) {
-                                    vm.reloadFromDb()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        val offlineNow by rememberUpdatedState(isOfflineMode)
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNow) vm.reloadFromDb()
                         }
 
                         EpisodeListScreen(
@@ -799,15 +817,7 @@ fun MainScaffold(
                     composable("playlists") { backStackEntry ->
                         val playlistsVm: PlaylistsViewModel = viewModel()
 
-                        DisposableEffect(backStackEntry.lifecycle) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    playlistsVm.loadPlaylists()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                        OnScreenResumed(backStackEntry.lifecycle) { playlistsVm.loadPlaylists() }
 
                         PlaylistsScreen(
                             viewModel = playlistsVm,
@@ -835,15 +845,7 @@ fun MainScaffold(
                             PlaylistDetailViewModel(playlistId)
                         }
 
-                        DisposableEffect(backStackEntry.lifecycle) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    vm.loadPlaylist()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                        OnScreenResumed(backStackEntry.lifecycle) { vm.loadPlaylist() }
 
                         PlaylistDetailScreen(
                             playlistId = playlistId,

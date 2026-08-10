@@ -1224,8 +1224,14 @@ private class PlayerLibrarySessionCallback(
                                 episodeDao.mergeFromApi(remoteEpisodes.map { it.toEntity(null) })
                                 fetchedTotal += remoteEpisodes.size
 
+                                // A short page is the authoritative end-of-list signal.
+                                // There used to be an extra "stop once we've fetched
+                                // feed.episode_count" break here, but that count is the
+                                // server's total across a podcast's supplementary feeds,
+                                // so it disagrees with what this per-feed endpoint
+                                // returns — trusting it risked stopping early and
+                                // silently dropping the tail of the feed.
                                 if (remoteEpisodes.size < batchSize) break
-                                if (expectedCount > 0 && fetchedTotal >= expectedCount) break
                                 if (fetchedTotal >= 5000) break
                                 offset += remoteEpisodes.size
                             }

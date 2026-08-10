@@ -70,7 +70,11 @@ class FeedListViewModel : ViewModel() {
                 _uiState.update { it.copy(feeds = feeds, isInitialLoading = false) }
             }
         }
-        refreshFeeds()
+        // No refreshFeeds() here. The flow above shows cached feeds straight away,
+        // and the server pull is triggered once by the screen's ON_RESUME observer
+        // (OnScreenResumed in MainActivity). Calling it here too meant two
+        // refreshes on every navigation to this tab, each flipping isRefreshing —
+        // which is what made pull-to-refresh appear to double-trigger.
         checkInitialSyncStatus()
     }
 

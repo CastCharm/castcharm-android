@@ -22,9 +22,11 @@ class PlaylistsViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(PlaylistsUiState())
     val uiState: StateFlow<PlaylistsUiState> = _uiState.asStateFlow()
 
-    init {
-        loadPlaylists()
-    }
+    // No load here on purpose. The screen's ON_RESUME observer (OnScreenResumed in
+    // MainActivity) is the single trigger for loading, including the first time the
+    // screen is shown. Loading in init as well meant two loads landed within
+    // milliseconds on every navigation, which made the refresh indicator flicker
+    // as though it had been triggered twice.
 
     fun loadPlaylists() {
         if (!CastCharmApp.apiClient.isInitialized) {

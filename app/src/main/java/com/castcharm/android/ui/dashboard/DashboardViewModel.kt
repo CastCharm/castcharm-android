@@ -88,7 +88,11 @@ class DashboardViewModel : ViewModel() {
             }
         }
 
-        refresh()
+        // Deliberately no refresh() here. The DB flow above already populates the
+        // screen from cache immediately; the server pull is triggered once, by the
+        // screen's ON_RESUME observer. Doing both meant two overlapping refreshes
+        // on every navigation to this tab, each toggling isRefreshing, which is
+        // what made pull-to-refresh look like it fired twice.
     }
 
     private fun episodeRepositoryOrNull(): EpisodeRepository? {
