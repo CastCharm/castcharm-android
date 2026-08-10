@@ -103,6 +103,20 @@ class StorageManager(private val context: Context) {
         }
     }
 
+    // Deletes a single downloaded episode's file and clears its local_path/size
+    // in the DB. Returns true if a file was actually removed. Used by the
+    // batch-delete action on EpisodeListScreen.
+    suspend fun deleteLocalFile(episodeId: Int): Boolean = withContext(Dispatchers.IO) {
+        val episode = episodeDao.getEpisodeOnce(episodeId) ?: return@withContext false
+        val path = episode.local_path ?: return@withContext false
+        val file = File(path)
+        val removed = if (file.exists()) file.delete() else false
+        episodeDao.update(
+            episode.copy(local_path = null, local_size_bytes = null, status = "pending")
+        )
+        removed
+    }
+
     // Deletes all locally downloaded episode files and resets their DB rows.
     // Used by the "Clear all downloads" button in SettingsScreen.
     suspend fun clearAllDownloads() = withContext(Dispatchers.IO) {

@@ -17,8 +17,11 @@ package com.castcharm.android.player
 //     root → [Continue, Recent, Podcasts, Downloads]
 //     Podcasts → feed_<id> → episode_<id>
 //   Offline mode collapses the tree to only the Downloads section.
-//   A polling loop (startLibraryRefreshObserver) detects DB changes and notifies
-//   Android Auto via notifyChildrenChanged() so the UI stays fresh.
+//   Data is pulled when the user navigates (onGetLibraryRoot for the tree,
+//   onGetChildren for a feed), never on a timer, and notifyBrowseNodes() then
+//   updates only the sections that actually changed. This matters because every
+//   notifyChildrenChanged() rebuilds that list on the head unit and discards the
+//   user's scroll position, so an unnecessary notification is a visible defect.
 //
 // Progress tracking:
 //   startProgressTracking() runs a 1-second loop that syncs playback position to DB
@@ -62,8 +65,10 @@ import com.castcharm.android.AppAuthState
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.MainActivity
 import com.castcharm.android.R
+import com.castcharm.android.SKIP_SILENCE_KEY
 import com.castcharm.android.data.api.ApiKeyInterceptor
 import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.repository.FeedRepository
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
 import com.castcharm.android.data.db.dao.FeedDao
@@ -92,9 +97,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
@@ -294,16 +296,19 @@ private fun initialMediaButtonPreferences(speed: Float): ImmutableList<CommandBu
     )
 }
 
-// Snapshot of Android Auto browse counts used by startLibraryRefreshObserver()
-// to detect when the DB has changed and notifyChildrenChanged() should be called.
-// Comparing snapshots avoids spamming Android Auto with unnecessary notifications.
+// Snapshot of Android Auto browse contents, compared either side of a server pull
+// so only the sections that genuinely moved get a notifyChildrenChanged().
 private data class BrowseSnapshot(
     val isOffline: Boolean,
     val rootCount: Int,
     val continueCount: Int,
+    val continueTop: Int?,
     val recentCount: Int,
+    val recentTop: Int?,
     val podcastsCount: Int,
-    val downloadsCount: Int
+    val podcastsTop: Int?,
+    val downloadsCount: Int,
+    val downloadsTop: Int?,
 )
 
 @OptIn(UnstableApi::class)
@@ -315,7 +320,6 @@ class PlayerService : MediaLibraryService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var progressJob: Job? = null
     private var connectivityModeJob: Job? = null
-    private var libraryRefreshJob: Job? = null
     @Volatile
     private var latestPlaybackSpeed: Float = 1.0f
 
@@ -335,22 +339,12 @@ class PlayerService : MediaLibraryService() {
             // readTimeout(0) disables the read deadline — required for streaming
             // large audio files without a mid-stream timeout.
             //
-            // We delegate cookie reads to ApiClient's live cookie jar rather than
-            // using a separate PersistentCookieJar. A separate jar would only load
-            // cookies from disk once at service creation time, so it would be stale
-            // if login happened after the service started — causing 401 errors when
-            // streaming. The application interceptor below guarantees ApiClient is
-            // initialized before OkHttp's BridgeInterceptor calls loadForRequest().
-            val streamingCookieJar = object : CookieJar {
-                override fun loadForRequest(url: HttpUrl): List<Cookie> =
-                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.loadForRequest(url) ?: emptyList()
-
-                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.saveFromResponse(url, cookies)
-                }
-            }
+            // Uses the process-wide PersistentCookieJar singleton so the same
+            // in-memory cookie map is shared with ApiClient. A login that
+            // completes after this service starts is visible to the very next
+            // streaming request with no reload required.
             val streamingClient = OkHttpClient.Builder()
-                .cookieJar(streamingCookieJar)
+                .cookieJar(com.castcharm.android.data.api.PersistentCookieJar.getInstance(this@PlayerService))
                 .addInterceptor(ApiKeyInterceptor(this@PlayerService))
                 .addInterceptor { chain ->
                     ensureApiClientInitializedBlocking(this@PlayerService)
@@ -402,6 +396,20 @@ class PlayerService : MediaLibraryService() {
                 .build()
             Log.d(TAG, "ExoPlayer built OK")
 
+            // Apply the current skip-silence preference to the freshly-built
+            // player, then keep it in sync as the user toggles the setting.
+            serviceScope.launch {
+                this@PlayerService.dataStore.data
+                    .map { it[SKIP_SILENCE_KEY] ?: false }
+                    .collectLatest { enabled ->
+                        withContext(Dispatchers.Main) {
+                            if (::player.isInitialized) {
+                                player.skipSilenceEnabled = enabled
+                            }
+                        }
+                    }
+            }
+
             latestPlaybackSpeed = player.playbackParameters.speed
 
             val callback = PlayerLibrarySessionCallback(
@@ -410,7 +418,14 @@ class PlayerService : MediaLibraryService() {
                 episodeDao = db.episodeDao(),
                 player = player,
                 scope = serviceScope,
-                sessionProvider = { mediaSession }
+                sessionProvider = { mediaSession },
+                // Fired from onGetLibraryRoot so the head-unit browse tree
+                // always kicks a fresh server pull. Debounced inside
+                // refreshFromServerForBrowse so repeated browses in the same
+                // session don't cause a request storm.
+                onBrowseRoot = {
+                    serviceScope.launch { refreshFromServerForBrowse("browse_root") }
+                },
             )
             callback.updateLatestPlaybackSpeed(latestPlaybackSpeed)
 
@@ -471,19 +486,23 @@ class PlayerService : MediaLibraryService() {
                 .build()
             Log.d(TAG, "MediaLibrarySession built OK, session=$mediaSession")
 
-            // Notify Android Auto of the initial library state on startup.
-            serviceScope.launch {
-                callback.notifyLibraryChanged()
-                notifyBrowseSectionsChanged()
-            }
-
             // Re-notify whenever the connectivity mode changes (online ↔ offline)
             // so Android Auto's browse tree updates to show/hide network sections.
+            // This is a genuine structural change to the tree, so a full rebuild is
+            // warranted here — unlike the routine refreshes, which are targeted.
+            //
+            // collectLatest fires immediately with the current mode, which doubles
+            // as the initial "here is the library" notification on startup; the
+            // separate startup notify that used to sit here was redundant with it.
             connectivityModeJob = serviceScope.launch {
                 CastCharmApp.connectivityMode.collectLatest { mode ->
                     Log.d(TAG, "AA connectivity mode changed: $mode")
-                    callback.notifyLibraryChanged()
-                    notifyBrowseSectionsChanged()
+                    notifyBrowseNodes(
+                        setOf(
+                            ROOT_ID, SECTION_CONTINUE, SECTION_RECENT,
+                            SECTION_PODCASTS, SECTION_DOWNLOADS
+                        )
+                    )
                 }
             }
 
@@ -505,56 +524,153 @@ class PlayerService : MediaLibraryService() {
                 }
             }
 
-            // Start the polling loop that detects DB content changes and pushes
-            // notifyChildrenChanged() updates to Android Auto.
-            startLibraryRefreshObserver()
+            // Warm the local DB from the server on service startup. Covers the
+            // common Android Auto scenario: the app hasn't been touched in days,
+            // the process was killed, the user plugs into the car and expects
+            // to see current episodes. Without this the head unit reads stale
+            // rows and only refreshes once the phone app is reopened.
+            serviceScope.launch { refreshFromServerForBrowse("service_create") }
         } catch (e: Exception) {
             Log.e(TAG, "PlayerService.onCreate FAILED — session will be null", e)
         }
     }
 
-    // Polls the DB every 1.5 seconds to detect content changes (new episodes
-    // downloaded, feed updated, played state changed) and pushes notifyChildrenChanged()
-    // to Android Auto. The snapshot comparison prevents unnecessary notifications
-    // when nothing has changed — Android Auto rate-limits requests from the system.
-    private fun startLibraryRefreshObserver() {
-        libraryRefreshJob?.cancel()
-        libraryRefreshJob = serviceScope.launch {
-            var lastSnapshot: BrowseSnapshot? = null
+    // Timestamp of the last successful (or attempted) server refresh triggered
+    // by an Android Auto browse. Guards refreshFromServerForBrowse() so multiple
+    // browse requests in quick succession don't hammer the server. The user
+    // won't notice a 30-second staleness while they're still opening the browse
+    // tree, but they will notice if we make the app hang on every screen.
+    @Volatile
+    private var lastBrowseRefreshMs: Long = 0L
+    private val browseRefreshMinIntervalMs: Long = 30_000L
 
-            while (isActive) {
-                try {
-                    val snapshot = readBrowseSnapshot()
-                    if (snapshot != lastSnapshot) {
-                        Log.d(TAG, "AA browse snapshot changed: $snapshot")
-                        notifyBrowseSectionsChanged()
-                        lastSnapshot = snapshot
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "AA browse snapshot poll failed", e)
-                }
+    /**
+     * Pull feeds, continue-listening, and recent-episodes down from the server
+     * into the local DB. Called on service create and on each library-root
+     * browse from Android Auto — the two moments when a cold app is about to
+     * show stale content to the user via the head unit.
+     *
+     * Snapshots the browse sections either side of the pull and notifies only the
+     * ones that changed, so a refresh that found nothing new stays invisible
+     * instead of rebuilding the tree under the user.
+     */
+    private suspend fun refreshFromServerForBrowse(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastBrowseRefreshMs < browseRefreshMinIntervalMs) {
+            Log.d(TAG, "AA browse refresh skipped (last ran ${now - lastBrowseRefreshMs}ms ago, reason=$reason)")
+            return
+        }
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) {
+            Log.d(TAG, "AA browse refresh skipped (offline/uninitialised, reason=$reason)")
+            return
+        }
+        lastBrowseRefreshMs = now
+        Log.d(TAG, "AA browse refresh starting (reason=$reason)")
 
-                delay(1500)
+        val before = runCatching { readBrowseSnapshot() }.getOrNull()
+
+        val api = CastCharmApp.apiClient.getApi()
+        val feedRepo = FeedRepository(api, db.feedDao())
+        val episodeRepo = EpisodeRepository(api, db.episodeDao())
+
+        // Feeds first — subsequent per-feed data depends on knowing which
+        // feeds exist. Each step is isolated in a runCatching so one failure
+        // doesn't stop the others; partial freshness is better than no freshness.
+        runCatching { feedRepo.refreshFeeds() }
+            .onFailure { Log.w(TAG, "AA browse refresh: feeds failed", it) }
+
+        runCatching { episodeRepo.fetchAndCacheContinueListening() }
+            .onFailure { Log.w(TAG, "AA browse refresh: continue-listening failed", it) }
+
+        // Recent episodes across every feed. mergeFromApi preserves phone-only
+        // fields (local_path, download progress, pending-sync flags) so this
+        // never clobbers a download in flight.
+        runCatching {
+            val recent = api.getAllEpisodes(limit = 100, offset = 0, order = "desc")
+            val phoneDownloadIds = db.downloadDao().getAllDownloadsOnceOrdered()
+                .map { it.episode_id }
+                .toSet()
+            val entities = recent.map { remote ->
+                remote.toEntity(
+                    existing = db.episodeDao().getEpisodeOnce(remote.id),
+                    hasActivePhoneDownload = remote.id in phoneDownloadIds,
+                )
+            }
+            db.episodeDao().mergeFromApi(
+                episodes = entities,
+                activePhoneDownloadEpisodeIds = phoneDownloadIds.intersect(recent.map { it.id }.toSet()),
+            )
+        }.onFailure { Log.w(TAG, "AA browse refresh: recent episodes failed", it) }
+
+        // Push an update only for sections the pull actually moved. A browse that
+        // changed nothing must stay silent, otherwise every navigation would
+        // rebuild the tree and undo the user's scrolling.
+        if (before != null) {
+            val changed = runCatching { changedNodes(before, readBrowseSnapshot()) }.getOrDefault(emptySet())
+            if (changed.isNotEmpty()) {
+                Log.d(TAG, "AA browse refresh changed nodes: $changed")
+                notifyBrowseNodes(changed)
             }
         }
+
+        Log.d(TAG, "AA browse refresh completed (reason=$reason)")
     }
 
+    // Snapshot of what each browse section currently contains. Taken either side
+    // of a server pull so we can notify exactly the sections whose contents moved,
+    // instead of blanket-notifying and resetting the user's scroll everywhere.
+    //
+    // This used to be sampled by a 1.5-second polling loop. Polling meant the
+    // browse tree could be rebuilt at any moment for reasons the user did not
+    // trigger; refreshes now happen when they navigate, which is the only time
+    // a rebuild is expected.
     private suspend fun readBrowseSnapshot(): BrowseSnapshot {
         val isOffline = CastCharmApp.isOfflineMode
-        val rootCount = visibleRootSections(isOffline).size
-        val continueCount = if (isOffline) 0 else db.episodeDao().getContinueListening(limit = 20).first().size
-        val recentCount = if (isOffline) 0 else db.episodeDao().getRecentEpisodesOnce(limit = 200).size
-        val podcastsCount = if (isOffline) 0 else db.feedDao().getFeedOnceAll().size
-        val downloadsCount = db.episodeDao().getDownloadedEpisodesOnce().size
+        val continueList = if (isOffline) emptyList() else db.episodeDao().getContinueListening(limit = 200).first()
+        val recentList = if (isOffline) emptyList() else db.episodeDao().getRecentEpisodesOnce(limit = 200)
+        val feedList = if (isOffline) emptyList() else db.feedDao().getFeedOnceAll()
+        val downloadList = db.episodeDao().getDownloadedEpisodesOnce()
 
         return BrowseSnapshot(
             isOffline = isOffline,
-            rootCount = rootCount,
-            continueCount = continueCount,
-            recentCount = recentCount,
-            podcastsCount = podcastsCount,
-            downloadsCount = downloadsCount
+            rootCount = visibleRootSections(isOffline).size,
+            continueCount = continueList.size,
+            continueTop = continueList.firstOrNull()?.id,
+            recentCount = recentList.size,
+            recentTop = recentList.firstOrNull()?.id,
+            podcastsCount = feedList.size,
+            podcastsTop = feedList.firstOrNull()?.id,
+            downloadsCount = downloadList.size,
+            downloadsTop = downloadList.firstOrNull()?.id,
         )
+    }
+
+    // Which browse nodes differ between two snapshots. Counts alone would miss a
+    // new episode arriving and an old one dropping off in the same pull, so each
+    // section also carries the id of its first row.
+    private fun changedNodes(before: BrowseSnapshot, after: BrowseSnapshot): Set<String> {
+        if (before.isOffline != after.isOffline) {
+            // Going online or offline adds/removes whole sections; the root and
+            // everything under it genuinely has to be re-read.
+            return setOf(
+                ROOT_ID, SECTION_CONTINUE, SECTION_RECENT, SECTION_PODCASTS, SECTION_DOWNLOADS
+            )
+        }
+        val nodes = mutableSetOf<String>()
+        if (before.rootCount != after.rootCount) nodes += ROOT_ID
+        if (before.continueCount != after.continueCount || before.continueTop != after.continueTop) {
+            nodes += SECTION_CONTINUE
+        }
+        if (before.recentCount != after.recentCount || before.recentTop != after.recentTop) {
+            nodes += SECTION_RECENT
+        }
+        if (before.podcastsCount != after.podcastsCount || before.podcastsTop != after.podcastsTop) {
+            nodes += SECTION_PODCASTS
+        }
+        if (before.downloadsCount != after.downloadsCount || before.downloadsTop != after.downloadsTop) {
+            nodes += SECTION_DOWNLOADS
+        }
+        return nodes
     }
 
     // Updates the subtitle field of the current MediaItem to reflect the new
@@ -654,7 +770,8 @@ class PlayerService : MediaLibraryService() {
                         }
 
                         // Auto-mark played if the threshold was crossed mid-playback.
-                        if (existing != null && existing.played != targetPlayed) {
+                        val playedFlipped = existing != null && existing.played != targetPlayed
+                        if (playedFlipped) {
                             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
                                 CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
                                 db.episodeDao().updatePlayedStatus(episodeId, targetPlayed, now, pending = false)
@@ -664,9 +781,19 @@ class PlayerService : MediaLibraryService() {
                         }
 
                         lastSyncMs = now
-                        // Notify Android Auto so the "Continue Listening" list updates
-                        // to reflect the new position/played state.
-                        notifyBrowseSectionsChanged(episodeId)
+
+                        // Only tell Android Auto about this when list *membership*
+                        // actually changed — the episode entering or leaving Continue
+                        // Listening. A position update on its own changes no list, and
+                        // notifying here fired every 10 seconds during playback, which
+                        // rebuilt the browse list under the user and bounced them back
+                        // to the top whenever they tried to scroll.
+                        val wasInContinue = existing != null &&
+                                !existing.played && existing.play_position_seconds > 0
+                        val nowInContinue = !targetPlayed && positionSeconds > 0
+                        if (playedFlipped || wasInContinue != nowInContinue) {
+                            notifyBrowseNodes(setOf(SECTION_CONTINUE))
+                        }
                     } catch (_: Exception) {
                         // Server call failed — write to DB with pending=true so
                         // SyncWorker can flush the progress on the next cycle.
@@ -697,36 +824,65 @@ class PlayerService : MediaLibraryService() {
             } else {
                 db.episodeDao().updatePlayedStatus(episodeId, true, now, pending = true)
             }
-            notifyBrowseSectionsChanged(episodeId)
+            // The episode just left Continue Listening. Deliberately not notifying
+            // the feed node: updating one played marker is not worth throwing away
+            // the scroll position of someone browsing that feed.
+            notifyBrowseNodes(setOf(SECTION_CONTINUE))
         } catch (_: Exception) {
             db.episodeDao().updatePlayedStatus(episodeId, true, now, pending = true)
         }
     }
 
-    private suspend fun notifyBrowseSectionsChanged(episodeId: Int? = null) {
+    /**
+     * Tell Android Auto that specific browse nodes changed — and nothing else.
+     *
+     * Every notifyChildrenChanged() makes a subscribed browser re-issue
+     * onGetChildren() and rebuild that list, which throws away the user's scroll
+     * position. So this takes an explicit node set: notifying a node the user did
+     * not ask about is not a harmless refresh, it yanks them back to the top of
+     * whatever they were reading. Never pass a node "just in case".
+     */
+    private suspend fun notifyBrowseNodes(nodes: Set<String>) {
+        if (nodes.isEmpty()) return
         val session = mediaSession ?: return
         val isOffline = CastCharmApp.isOfflineMode
-        val rootSections = visibleRootSections(isOffline)
-        val rootCount = rootSections.size
-        val feedCount = if (isOffline) 0 else db.feedDao().getFeedOnceAll().size
-        val continueCount = if (isOffline) 0 else db.episodeDao().getContinueListening(limit = 20).first().size
-        val recentCount = if (isOffline) 0 else db.episodeDao().getRecentEpisodesOnce(limit = 200).size
-        val downloadCount = db.episodeDao().getDownloadedEpisodesOnce().size
 
-        session.notifyChildrenChanged(ROOT_ID, rootCount, browseLibraryParams())
-        session.notifyChildrenChanged(SECTION_DOWNLOADS, downloadCount, playableLibraryParams())
+        for (node in nodes) {
+            // Network-backed sections are hidden entirely while offline; notifying
+            // them would just make the head unit re-read an empty list.
+            if (isOffline && node != ROOT_ID && node != SECTION_DOWNLOADS) continue
 
-        if (!isOffline) {
-            session.notifyChildrenChanged(SECTION_CONTINUE, continueCount, playableLibraryParams())
-            session.notifyChildrenChanged(SECTION_RECENT, recentCount, playableLibraryParams())
-            session.notifyChildrenChanged(SECTION_PODCASTS, feedCount, browsableLibraryParams())
-
-            if (episodeId != null) {
-                val episode = db.episodeDao().getEpisodeOnce(episodeId)
-                val feedId = episode?.feed_id
-                if (feedId != null) {
-                    val feedEpisodeCount = db.episodeDao().getEpisodesByFeedOnce(feedId).size
-                    session.notifyChildrenChanged(feedMediaId(feedId), feedEpisodeCount, playableLibraryParams())
+            when {
+                node == ROOT_ID ->
+                    session.notifyChildrenChanged(
+                        ROOT_ID, visibleRootSections(isOffline).size, browseLibraryParams()
+                    )
+                node == SECTION_DOWNLOADS ->
+                    session.notifyChildrenChanged(
+                        node, db.episodeDao().getDownloadedEpisodesOnce().size, playableLibraryParams()
+                    )
+                node == SECTION_CONTINUE ->
+                    session.notifyChildrenChanged(
+                        node, db.episodeDao().getContinueListening(limit = 200).first().size,
+                        playableLibraryParams()
+                    )
+                node == SECTION_RECENT ->
+                    session.notifyChildrenChanged(
+                        node, db.episodeDao().getRecentEpisodesOnce(limit = 200).size,
+                        playableLibraryParams()
+                    )
+                node == SECTION_PODCASTS ->
+                    session.notifyChildrenChanged(
+                        node, db.feedDao().getFeedOnceAll().size, browsableLibraryParams()
+                    )
+                node.startsWith("feed_") -> {
+                    val feedId = node.removePrefix("feed_").toIntOrNull()
+                    if (feedId != null) {
+                        session.notifyChildrenChanged(
+                            node, db.episodeDao().getEpisodesForAndroidAutoByFeed(feedId).size,
+                            playableLibraryParams()
+                        )
+                    }
                 }
             }
         }
@@ -742,7 +898,6 @@ class PlayerService : MediaLibraryService() {
     override fun onDestroy() {
         stopProgressTracking()
         connectivityModeJob?.cancel()
-        libraryRefreshJob?.cancel()
         mediaSession?.release()
         mediaSession = null
         player.release()
@@ -764,9 +919,27 @@ private class PlayerLibrarySessionCallback(
     private val player: Player,
     private val scope: CoroutineScope,
     private val sessionProvider: () -> MediaLibrarySession?,
+    // Invoked whenever a browser asks for the library root — the "user just
+    // opened the browse tree" signal. Used to pull fresh data from the server
+    // so the head unit doesn't render a snapshot from days ago.
+    private val onBrowseRoot: () -> Unit = {},
 ) : MediaLibraryService.MediaLibrarySession.Callback {
 
     private val connectedControllers = linkedSetOf<MediaSession.ControllerInfo>()
+
+    // Last time each feed's episodes were pulled from the server, so re-entering a
+    // feed doesn't re-download its whole back catalogue. Marked *before* the fetch
+    // runs, so a fetch that itself provokes a re-browse can't start a second one.
+    private val feedRefreshedAtMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+    private val feedRefreshTtlMs = 5 * 60_000L
+
+    private fun feedBrowseRefreshDue(feedId: Int): Boolean {
+        val now = System.currentTimeMillis()
+        val last = feedRefreshedAtMs[feedId]
+        if (last != null && now - last < feedRefreshTtlMs) return false
+        feedRefreshedAtMs[feedId] = now
+        return true
+    }
 
     @Volatile
     private var latestPlaybackSpeed: Float = 1.0f
@@ -788,25 +961,6 @@ private class PlayerLibrarySessionCallback(
             if (!future.isDone) future.set(fallback)
         }
         return future
-    }
-
-    suspend fun notifyLibraryChanged() {
-        val session = sessionProvider() ?: return
-        val isOffline = CastCharmApp.isOfflineMode
-        val rootCount = visibleRootSections(isOffline).size
-        val feedCount = if (isOffline) 0 else feedDao.getFeedOnceAll().size
-        val continueCount = if (isOffline) 0 else episodeDao.getContinueListening(limit = 20).first().size
-        val recentCount = if (isOffline) 0 else episodeDao.getRecentEpisodesOnce(limit = 200).size
-        val downloadCount = episodeDao.getDownloadedEpisodesOnce().size
-
-        session.notifyChildrenChanged(ROOT_ID, rootCount, browseLibraryParams())
-        session.notifyChildrenChanged(SECTION_DOWNLOADS, downloadCount, playableLibraryParams())
-
-        if (!isOffline) {
-            session.notifyChildrenChanged(SECTION_CONTINUE, continueCount, playableLibraryParams())
-            session.notifyChildrenChanged(SECTION_RECENT, recentCount, playableLibraryParams())
-            session.notifyChildrenChanged(SECTION_PODCASTS, feedCount, browsableLibraryParams())
-        }
     }
 
     override fun onConnect(
@@ -924,6 +1078,11 @@ private class PlayerLibrarySessionCallback(
         browser: MediaSession.ControllerInfo,
         params: MediaLibraryService.LibraryParams?
     ): ListenableFuture<LibraryResult<MediaItem>> {
+        // Fire-and-forget: fetch fresh data from the server in the background
+        // so the head unit's browse tree updates as soon as the DB does. The
+        // return path below still uses whatever's currently in the DB so this
+        // request stays fast (Android Auto has a strict timeout).
+        onBrowseRoot()
         val root = rootItem(context)
         val extras = root.mediaMetadata.extras ?: Bundle()
         extras.putInt(
@@ -1034,8 +1193,16 @@ private class PlayerLibrarySessionCallback(
                     scope.launch { PodcastArtworkProvider.prefetchFeedArtwork(context, feedId) }
 
                     val existingCount = episodeDao.getEpisodesForAndroidAutoByFeed(feedId).size
-                    val expectedCount = feed.episode_count
-                    val shouldRefreshAll = page <= 0 && (expectedCount <= 0 || existingCount < expectedCount)
+                    // Refresh when we have nothing cached, or when this feed hasn't
+                    // been pulled recently. The previous test compared the local row
+                    // count against feed.episode_count, which could never balance in
+                    // two common cases — the server sums that count across a podcast's
+                    // supplementary feeds (whose episodes are stored under their own
+                    // feed_id), and a feed row that hasn't synced yet reports 0, which
+                    // the "expectedCount <= 0" arm also treated as stale. Either way it
+                    // re-fetched the entire feed on every single browse.
+                    val shouldRefreshAll = page <= 0 &&
+                            (existingCount == 0 || feedBrowseRefreshDue(feedId))
 
                     if (!CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized && shouldRefreshAll) {
                         try {

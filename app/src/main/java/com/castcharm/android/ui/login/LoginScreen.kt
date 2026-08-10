@@ -82,8 +82,22 @@ fun LoginScreen(
             singleLine = true,
             enabled = !uiState.isLoading,
             supportingText = {
-                if (uiState.serverUrl.isNotBlank() && !isValidUrl(uiState.serverUrl)) {
-                    Text("Must start with http:// or https://", color = MaterialTheme.colorScheme.error)
+                when {
+                    uiState.serverUrl.isNotBlank() && !isValidUrl(uiState.serverUrl) -> {
+                        Text(
+                            "Must start with http:// or https://",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    // Nudge users typing a plain-HTTP URL that reaches outside
+                    // their home network. Local addresses stay silent because
+                    // HTTP is the norm inside a LAN.
+                    isPublicHttpUrl(uiState.serverUrl) -> {
+                        Text(
+                            "This looks like a public address. Prefer https:// so your login isn't sent in the clear.",
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
                 }
             },
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -191,4 +205,28 @@ fun LoginScreen(
 private fun isValidUrl(url: String): Boolean {
     if (url.isBlank()) return true
     return url.startsWith("http://") || url.startsWith("https://")
+}
+
+// True when the URL uses plain HTTP and looks like it targets something outside
+// the user's own LAN — the case where sending credentials in the clear actually
+// matters. Loopback and RFC1918 addresses stay silent because HTTP is the norm
+// inside a home network and nagging about it would be noise.
+private fun isPublicHttpUrl(url: String): Boolean {
+    if (!url.startsWith("http://")) return false
+    val host = url.removePrefix("http://").substringBefore('/').substringBefore(':').lowercase()
+    if (host.isBlank()) return false
+    if (host == "localhost" || host.endsWith(".local") || host.endsWith(".lan")) return false
+    val octets = host.split('.')
+    if (octets.size == 4 && octets.all { it.toIntOrNull() in 0..255 }) {
+        val a = octets[0].toInt()
+        val b = octets[1].toInt()
+        // 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
+        if (a == 127 || a == 10) return false
+        if (a == 172 && b in 16..31) return false
+        if (a == 192 && b == 168) return false
+        if (a == 169 && b == 254) return false
+        return true
+    }
+    // Non-IP host that isn't obviously local — flag it.
+    return true
 }

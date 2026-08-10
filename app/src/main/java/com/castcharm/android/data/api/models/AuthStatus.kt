@@ -27,12 +27,23 @@ data class ExchangeKeyRequest(
 
 // POST /api/auth/exchange-key response. key is the plaintext credential and is
 // returned exactly once — the server stores only a hash of it, so it cannot be
-// read back later. The server identifies the key from the request header on
-// self-revoke, so the id doesn't need keeping client-side.
+// read back later.
+//
+// We keep id, name, and key_prefix around because they let the "This device"
+// panel in Settings identify which key belongs to this device (no need to hit
+// the full list) and rename it via PATCH /api/settings/api-keys/{id} without
+// having to look it up.
 data class ApiKeyCreated(
     val id: Int,
     val name: String,
+    val key_prefix: String,
     val key: String
+)
+
+// PATCH /api/settings/api-keys/{id} body. Just the new name — the server
+// preserves everything else about the key.
+data class ApiKeyRenameRequest(
+    val name: String
 )
 
 // POST /api/episodes/{id}/progress body. Sent every 10 seconds while playing

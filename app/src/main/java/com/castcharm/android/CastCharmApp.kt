@@ -108,6 +108,9 @@ class CastCharmApp : Application(), ImageLoaderFactory {
             .crossfade(200)
             .callFactory(AuthAwareCallFactory(apiClient))
             .build()
+        // Register notification channels once at process start. Cheap no-op on
+        // subsequent boots because the system tracks channel identity.
+        com.castcharm.android.notifications.NewEpisodesNotifier.ensureChannel(this)
     }
 
     override fun onTerminate() {

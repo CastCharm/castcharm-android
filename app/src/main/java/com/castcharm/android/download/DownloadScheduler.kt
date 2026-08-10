@@ -25,6 +25,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
+import com.castcharm.android.WIFI_ONLY_DOWNLOADS_KEY
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.entities.DownloadEntity
 import com.castcharm.android.dataStore
@@ -165,10 +166,11 @@ class DownloadScheduler(private val context: Context) {
         // Read the user-set concurrency limit from DataStore. coerceAtLeast(1)
         // ensures we always allow at least one download even if the preference
         // was somehow set to 0.
-        val maxConcurrent = context.dataStore.data
-            .map { it[MAX_CONCURRENT_DOWNLOADS_KEY] ?: DEFAULT_MAX_CONCURRENT_DOWNLOADS }
-            .first()
+        val prefs = context.dataStore.data.first()
+        val maxConcurrent = (prefs[MAX_CONCURRENT_DOWNLOADS_KEY] ?: DEFAULT_MAX_CONCURRENT_DOWNLOADS)
             .coerceAtLeast(1)
+        val wifiOnly = prefs[WIFI_ONLY_DOWNLOADS_KEY] ?: false
+        val requiredNetwork = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
 
         // getAllDownloadsOnceOrdered() returns rows oldest-first (by enqueued_at)
         // so FIFO ordering is preserved when counting active slots.
@@ -293,14 +295,14 @@ class DownloadScheduler(private val context: Context) {
             // enqueueing a fresh one (defensive cleanup).
             runCatching { workManager.cancelUniqueWork("download_$episodeId") }
 
-            // Build the WorkRequest. NetworkType.CONNECTED means any network
-            // (wifi or cellular) — the user controls cellular usage separately
-            // in system settings.
+            // Network constraint respects the Wi-Fi-only preference: UNMETERED
+            // waits for a non-metered connection (typically Wi-Fi), CONNECTED
+            // allows any network.
             val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
                 .setInputData(workDataOf("episode_id" to episodeId))
                 .setConstraints(
                     Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .setRequiredNetworkType(requiredNetwork)
                         .build()
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, DOWNLOAD_BACKOFF_SECONDS, TimeUnit.SECONDS)

@@ -87,6 +87,20 @@ interface EpisodeDao {
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId AND hidden = 0 AND played = 0 ORDER BY published_at DESC")
     fun getUnplayedEpisodesByFeed(feedId: Int): Flow<List<EpisodeEntity>>
 
+    // Offline search fallback. Matches the given term against title and
+    // description columns. The percent signs must be included by the caller
+    // (e.g., "%dogs%") so the DAO signature stays declarative.
+    @Query("""
+        SELECT * FROM episodes
+        WHERE hidden = 0 AND (
+            title LIKE :term COLLATE NOCASE
+            OR description LIKE :term COLLATE NOCASE
+        )
+        ORDER BY published_at DESC
+        LIMIT :limit
+    """)
+    suspend fun searchEpisodesLocal(term: String, limit: Int = 40): List<EpisodeEntity>
+
     @Query("SELECT * FROM episodes WHERE played = 0 AND play_position_seconds > 0 ORDER BY last_played_at DESC LIMIT :limit")
     fun getContinueListening(limit: Int = 10): Flow<List<EpisodeEntity>>
 

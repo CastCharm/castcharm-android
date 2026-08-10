@@ -51,6 +51,15 @@ interface CastCharmApi {
     @DELETE("api/settings/api-keys/self")
     suspend fun revokeOwnKey()
 
+    // Renames a key by id. The Android app calls this only for its own key
+    // (id stored in AuthStore at enrolment time) so the user can label the
+    // device something friendlier than the default hardware model string.
+    @PATCH("api/settings/api-keys/{key_id}")
+    suspend fun renameApiKey(
+        @Path("key_id") keyId: Int,
+        @Body body: ApiKeyRenameRequest,
+    )
+
     // ---- Feeds --------------------------------------------------------------
     @GET("api/feeds")
     suspend fun getFeeds(): List<FeedOut>

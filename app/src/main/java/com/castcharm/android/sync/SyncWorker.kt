@@ -23,6 +23,7 @@ import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.models.ProgressRequest
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
+import com.castcharm.android.notifications.NewEpisodesNotifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -33,12 +34,14 @@ class SyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        // Don't try to sync while explicitly in offline mode — the user chose to
-        // work offline and we should not break that expectation. Return retry() so
-        // WorkManager will try again the next time it fires.
+        // Don't try to sync while explicitly in offline mode — the user chose
+        // to work offline. Return success() rather than retry(): offline mode
+        // isn't a failure, and a one-time worker enqueued while offline
+        // shouldn't burn backoff attempts. The periodic worker will run again
+        // on its next scheduled tick regardless.
         if (CastCharmApp.isOfflineMode) {
             Log.d("SyncWorker", "Skipping sync because offline mode is active")
-            return@withContext Result.retry()
+            return@withContext Result.success()
         }
 
         val db = AppDatabase.getDatabase(applicationContext)
@@ -70,6 +73,13 @@ class SyncWorker(
             Log.e("SyncWorker", "ApiClient unavailable during sync", e)
             return@withContext Result.retry()
         }
+
+        // Piggyback: check for new episodes on the server and post a summary
+        // notification if the user opted in. Runs regardless of whether there
+        // are pending flushes so the notification cadence tracks feed activity,
+        // not the phone's outbound queue.
+        runCatching { NewEpisodesNotifier.maybeNotify(applicationContext, api) }
+            .onFailure { Log.w("SyncWorker", "New-episodes check failed", it) }
 
         // Fetch all episodes with pending sync flags set.
         val pending = dao.getPendingSyncEpisodes()

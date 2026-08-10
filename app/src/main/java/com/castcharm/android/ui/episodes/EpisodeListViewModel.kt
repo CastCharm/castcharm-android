@@ -21,6 +21,7 @@ import com.castcharm.android.data.repository.EpisodeRepository
 import com.castcharm.android.data.repository.FeedRepository
 import com.castcharm.android.data.api.models.PlayerPlayRequest
 import com.castcharm.android.download.DownloadScheduler
+import com.castcharm.android.download.StorageManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,6 +49,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
 
     private val db = AppDatabase.getDatabase(CastCharmApp.instance)
     private val downloadScheduler = DownloadScheduler(CastCharmApp.instance)
+    private val storageManager = StorageManager(CastCharmApp.instance)
 
     init {
         loadFeedAndEpisodes()
@@ -358,6 +360,36 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         viewModelScope.launch {
             _uiState.value.selectedEpisodes.forEach { id ->
                 downloadScheduler.scheduleDownload(id)
+            }
+            clearSelection()
+        }
+    }
+
+    // Applies the played state to every currently-selected episode. Reuses the
+    // existing togglePlayed() path per-episode so pending/offline handling and
+    // server sync behave identically to a single toggle.
+    fun markSelectedPlayed(played: Boolean) {
+        viewModelScope.launch {
+            val ids = _uiState.value.selectedEpisodes
+            val currentEpisodes = _uiState.value.episodes.associateBy { it.id }
+            ids.forEach { id ->
+                val current = currentEpisodes[id]?.played ?: false
+                if (current != played) {
+                    togglePlayed(id, current)
+                }
+            }
+            clearSelection()
+        }
+    }
+
+    // Removes the on-disk file for every currently-selected episode that has
+    // one, then clears the selection. Episodes that aren't downloaded are
+    // silently skipped inside deleteLocalFile(). This affects the phone only —
+    // the episode remains available on the server.
+    fun deleteSelectedDownloads() {
+        viewModelScope.launch {
+            _uiState.value.selectedEpisodes.forEach { id ->
+                runCatching { storageManager.deleteLocalFile(id) }
             }
             clearSelection()
         }

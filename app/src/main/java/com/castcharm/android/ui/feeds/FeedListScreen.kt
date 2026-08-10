@@ -45,6 +45,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -178,49 +179,57 @@ fun FeedListScreen(
             return@Scaffold
         }
 
-        when {
-            uiState.isInitialLoading && uiState.feeds.isEmpty() -> {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 160.dp),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = 12.dp,
-                        top = 12.dp + padding.calculateTopPadding(),
-                        end = 12.dp,
-                        bottom = 12.dp
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(6) {
-                        SkeletonArtworkCard()
+        PullToRefreshBox(
+            isRefreshing = uiState.isRefreshing,
+            onRefresh = { viewModel.refreshFeeds() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = padding.calculateTopPadding()),
+        ) {
+            when {
+                uiState.isInitialLoading && uiState.feeds.isEmpty() -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 160.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            top = 12.dp,
+                            end = 12.dp,
+                            bottom = 12.dp
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(6) {
+                            SkeletonArtworkCard()
+                        }
                     }
                 }
-            }
 
-            uiState.feeds.isEmpty() -> {
-                EmptyScreen(modifier = Modifier.padding(top = padding.calculateTopPadding()))
-            }
+                uiState.feeds.isEmpty() -> {
+                    EmptyScreen(modifier = Modifier)
+                }
 
-            else -> {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 160.dp),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = 12.dp,
-                        top = 12.dp + padding.calculateTopPadding(),
-                        end = 12.dp,
-                        bottom = 12.dp
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(uiState.feeds, key = { it.id }) { feed ->
-                        FeedCard(
-                            feed = feed,
-                            baseUrl = baseUrl,
-                            onClick = { onNavigateToEpisodes(feed.id) }
-                        )
+                else -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 160.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            top = 12.dp,
+                            end = 12.dp,
+                            bottom = 12.dp
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(uiState.feeds, key = { it.id }) { feed ->
+                            FeedCard(
+                                feed = feed,
+                                baseUrl = baseUrl,
+                                onClick = { onNavigateToEpisodes(feed.id) }
+                            )
+                        }
                     }
                 }
             }

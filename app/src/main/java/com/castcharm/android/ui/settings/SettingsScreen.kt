@@ -44,8 +44,22 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import android.net.Uri
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.NOTIFY_NEW_EPISODES_KEY
+import com.castcharm.android.SKIP_SILENCE_KEY
 import com.castcharm.android.THEME_KEY
+import com.castcharm.android.WIFI_ONLY_DOWNLOADS_KEY
+import com.castcharm.android.data.api.models.AddFeedRequest
+import com.castcharm.android.opml.OpmlParser
+import com.castcharm.android.data.api.AuthStore
+import com.castcharm.android.data.api.models.ApiKeyRenameRequest
 import com.castcharm.android.dataStore
 import com.castcharm.android.download.DownloadScheduler
 import com.castcharm.android.download.StorageManager
@@ -75,7 +89,22 @@ data class SettingsUiState(
     val fontScale: Float = 1.0f,
     val maxConcurrentDownloads: Int = DEFAULT_MAX_CONCURRENT_DOWNLOADS,
     val isClearing: Boolean = false,
-    val enablePlaylists: Boolean = DEFAULT_ENABLE_PLAYLISTS
+    val enablePlaylists: Boolean = DEFAULT_ENABLE_PLAYLISTS,
+    val wifiOnlyDownloads: Boolean = false,
+    val skipSilence: Boolean = false,
+    val notifyNewEpisodes: Boolean = false,
+    val opmlImportState: OpmlImportState? = null,
+)
+
+// Non-null while an OPML import is running. `total` is the number of feeds
+// discovered in the file; `added` counts successful POSTs; `failed` counts
+// duplicates or unreachable URLs.
+data class OpmlImportState(
+    val total: Int,
+    val current: Int,
+    val added: Int,
+    val failed: Int,
+    val done: Boolean = false,
 )
 
 class SettingsViewModel(private val storageManager: StorageManager) : ViewModel() {
@@ -111,6 +140,15 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
             val enablePlaylists = CastCharmApp.instance.dataStore.data
                 .map { it[ENABLE_PLAYLISTS_KEY] ?: DEFAULT_ENABLE_PLAYLISTS }
                 .first()
+            val wifiOnlyDownloads = CastCharmApp.instance.dataStore.data
+                .map { it[WIFI_ONLY_DOWNLOADS_KEY] ?: false }
+                .first()
+            val skipSilence = CastCharmApp.instance.dataStore.data
+                .map { it[SKIP_SILENCE_KEY] ?: false }
+                .first()
+            val notifyNewEpisodes = CastCharmApp.instance.dataStore.data
+                .map { it[NOTIFY_NEW_EPISODES_KEY] ?: false }
+                .first()
 
             val externalDir = CastCharmApp.instance.getExternalFilesDir(null) ?: CastCharmApp.instance.filesDir
             val totalSpace = externalDir.totalSpace
@@ -132,7 +170,10 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
                 themeMode = themeMode,
                 fontScale = fontScale,
                 maxConcurrentDownloads = maxConcurrentDownloads,
-                enablePlaylists = enablePlaylists
+                enablePlaylists = enablePlaylists,
+                wifiOnlyDownloads = wifiOnlyDownloads,
+                skipSilence = skipSilence,
+                notifyNewEpisodes = notifyNewEpisodes,
             )
         }
     }
@@ -182,6 +223,88 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
         }
     }
 
+    fun setWifiOnlyDownloads(enabled: Boolean) {
+        viewModelScope.launch {
+            CastCharmApp.instance.dataStore.edit { it[WIFI_ONLY_DOWNLOADS_KEY] = enabled }
+            _uiState.value = _uiState.value.copy(wifiOnlyDownloads = enabled)
+        }
+    }
+
+    fun setSkipSilence(enabled: Boolean) {
+        viewModelScope.launch {
+            CastCharmApp.instance.dataStore.edit { it[SKIP_SILENCE_KEY] = enabled }
+            _uiState.value = _uiState.value.copy(skipSilence = enabled)
+        }
+    }
+
+    fun setNotifyNewEpisodes(enabled: Boolean) {
+        viewModelScope.launch {
+            CastCharmApp.instance.dataStore.edit { it[NOTIFY_NEW_EPISODES_KEY] = enabled }
+            _uiState.value = _uiState.value.copy(notifyNewEpisodes = enabled)
+        }
+    }
+
+    fun importOpml(uri: Uri) {
+        viewModelScope.launch {
+            val ctx = CastCharmApp.instance
+            val urls = try {
+                ctx.contentResolver.openInputStream(uri)?.use { stream ->
+                    OpmlParser.parse(stream)
+                } ?: emptyList()
+            } catch (_: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    opmlImportState = OpmlImportState(
+                        total = 0, current = 0, added = 0, failed = 0, done = true,
+                    ),
+                )
+                return@launch
+            }
+
+            if (urls.isEmpty()) {
+                _uiState.value = _uiState.value.copy(
+                    opmlImportState = OpmlImportState(
+                        total = 0, current = 0, added = 0, failed = 0, done = true,
+                    ),
+                )
+                return@launch
+            }
+
+            _uiState.value = _uiState.value.copy(
+                opmlImportState = OpmlImportState(
+                    total = urls.size, current = 0, added = 0, failed = 0,
+                ),
+            )
+
+            var added = 0
+            var failed = 0
+            urls.forEachIndexed { index, url ->
+                _uiState.value = _uiState.value.copy(
+                    opmlImportState = OpmlImportState(
+                        total = urls.size, current = index + 1, added = added, failed = failed,
+                    ),
+                )
+                val ok = runCatching {
+                    CastCharmApp.apiClient.getApi().addFeed(AddFeedRequest(url))
+                }.isSuccess
+                if (ok) added++ else failed++
+            }
+
+            _uiState.value = _uiState.value.copy(
+                opmlImportState = OpmlImportState(
+                    total = urls.size,
+                    current = urls.size,
+                    added = added,
+                    failed = failed,
+                    done = true,
+                ),
+            )
+        }
+    }
+
+    fun dismissOpmlImport() {
+        _uiState.value = _uiState.value.copy(opmlImportState = null)
+    }
+
     fun clearAllDownloads() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isClearing = true)
@@ -206,6 +329,42 @@ fun SettingsScreen(
     var retryingKeyEnrolment by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // POST_NOTIFICATIONS is a runtime permission on Android 13+. The launcher
+    // fires whenever the user flips the toggle on without the permission
+    // already granted. If the user denies, we still persist the pref so a
+    // future "Retry" or system-settings grant activates without another click.
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            scope.launch {
+                snackbarHostState.showSnackbar(
+                    "Notifications are turned off in Android settings. You can enable them there."
+                )
+            }
+        }
+    }
+
+    // OPML picker. Accepts any XML-ish MIME type since exports vary in what
+    // they self-report. Parsing is defensive so a wrong file at worst yields
+    // zero URLs and the "no feeds found" branch of the result dialog.
+    val opmlPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) viewModel.importOpml(uri)
+    }
+
+    // "This device" identity — everything we know about our own API key. Tracked
+    // as local state so a successful rename updates the display without having
+    // to refetch. Older installs that predate stored ids/prefixes will simply
+    // hide the rename affordance (deviceKeyId == null).
+    val deviceKeyId = remember { AuthStore.keyId }
+    val devicePrefix = remember { AuthStore.keyPrefix }
+    var deviceName by remember { mutableStateOf(AuthStore.keyName) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameInput by remember { mutableStateOf("") }
+    var renameInFlight by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -366,6 +525,44 @@ fun SettingsScreen(
                             )
                         }
 
+                        // "This device" — the friendly name the server will
+                        // show for this phone in its API key list. Hidden on
+                        // installs that predate stored id/prefix (upgraded
+                        // clients get identity fields on their next re-enrol).
+                        if (deviceKeyId != null && !deviceName.isNullOrBlank()) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                            )
+                            Text(
+                                "This device",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = deviceName ?: "",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            if (!devicePrefix.isNullOrBlank()) {
+                                Text(
+                                    text = "Key ${devicePrefix}…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    renameInput = deviceName ?: ""
+                                    showRenameDialog = true
+                                },
+                                enabled = !isOfflineMode,
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Rename this device")
+                            }
+                        }
+
                         if (isOfflineMode) {
                             AssistChip(
                                 onClick = { },
@@ -408,31 +605,111 @@ fun SettingsScreen(
                             Text("Features", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         }
 
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                                Text("Playlists", style = MaterialTheme.typography.labelLarge)
-                                Text(
-                                    "Create and manage custom playlists",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = uiState.enablePlaylists,
-                                onCheckedChange = { viewModel.setEnablePlaylists(it) },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = MaterialTheme.colorScheme.primary,
-                                    checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                                    uncheckedThumbColor = MaterialTheme.colorScheme.outline,
-                                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                                )
+                        SettingsToggleRow(
+                            title = "Playlists",
+                            subtitle = "Create and manage custom playlists",
+                            checked = uiState.enablePlaylists,
+                            onCheckedChange = { viewModel.setEnablePlaylists(it) },
+                        )
+                        SettingsToggleRow(
+                            title = "Wi-Fi-only downloads",
+                            subtitle = "Wait for an unmetered network before downloading episodes.",
+                            checked = uiState.wifiOnlyDownloads,
+                            onCheckedChange = { viewModel.setWifiOnlyDownloads(it) },
+                        )
+                        SettingsToggleRow(
+                            title = "Skip silence",
+                            subtitle = "Trim silent gaps during playback for a shorter runtime.",
+                            checked = uiState.skipSilence,
+                            onCheckedChange = { viewModel.setSkipSilence(it) },
+                        )
+                    }
+                }
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Notifications,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
                             )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Notifications",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+
+                        SettingsToggleRow(
+                            title = "New-episode alerts",
+                            subtitle = "Only fires when a background sync finds new episodes on your server.",
+                            checked = uiState.notifyNewEpisodes,
+                            onCheckedChange = { enabled ->
+                                viewModel.setNotifyNewEpisodes(enabled)
+                                if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    val ctx = CastCharmApp.instance
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        ctx,
+                                        Manifest.permission.POST_NOTIFICATIONS,
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (!granted) {
+                                        notificationPermissionLauncher.launch(
+                                            Manifest.permission.POST_NOTIFICATIONS
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Podcasts,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Podcasts",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Text(
+                            "Import your subscriptions from an OPML file exported by another podcast app.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                opmlPickerLauncher.launch(
+                                    arrayOf(
+                                        "text/xml",
+                                        "application/xml",
+                                        "text/x-opml",
+                                        "*/*",
+                                    )
+                                )
+                            },
+                            enabled = !isOfflineMode && uiState.opmlImportState == null,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Import feeds from OPML file")
                         }
                     }
                 }
@@ -659,6 +936,140 @@ fun SettingsScreen(
                 onChangeServer()
             },
             onDismiss = { showChangeServerDialog = false }
+        )
+    }
+
+    uiState.opmlImportState?.let { state ->
+        AlertDialog(
+            onDismissRequest = { if (state.done) viewModel.dismissOpmlImport() },
+            title = { Text(if (state.done) "Import finished" else "Importing feeds") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    when {
+                        state.done && state.total == 0 -> Text(
+                            "No feed URLs were found in that file.",
+                        )
+                        state.done -> Text(
+                            "Added ${state.added} of ${state.total} feeds." +
+                                if (state.failed > 0) " ${state.failed} couldn't be added (already present or unreachable)." else ""
+                        )
+                        else -> {
+                            Text("Adding feed ${state.current} of ${state.total}…")
+                            LinearProgressIndicator(
+                                progress = { state.current.toFloat() / state.total.coerceAtLeast(1) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                if (state.done) {
+                    TextButton(onClick = { viewModel.dismissOpmlImport() }) { Text("OK") }
+                }
+            },
+            dismissButton = null,
+        )
+    }
+
+    if (showRenameDialog && deviceKeyId != null) {
+        AlertDialog(
+            onDismissRequest = { if (!renameInFlight) showRenameDialog = false },
+            title = { Text("Rename this device") },
+            text = {
+                Column {
+                    Text(
+                        "The name is only shown in the server's API key list — clients aren't affected by it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                    OutlinedTextField(
+                        value = renameInput,
+                        onValueChange = { renameInput = it },
+                        singleLine = true,
+                        enabled = !renameInFlight,
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Device name") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !renameInFlight && renameInput.trim().isNotEmpty(),
+                    onClick = {
+                        val newName = renameInput.trim()
+                        renameInFlight = true
+                        scope.launch {
+                            val ok = runCatching {
+                                CastCharmApp.apiClient.getApi()
+                                    .renameApiKey(deviceKeyId, ApiKeyRenameRequest(newName))
+                                AuthStore.updateName(CastCharmApp.instance, newName)
+                            }.isSuccess
+                            renameInFlight = false
+                            showRenameDialog = false
+                            if (ok) {
+                                deviceName = newName
+                                snackbarHostState.showSnackbar("Renamed to \"$newName\"")
+                            } else {
+                                snackbarHostState.showSnackbar(
+                                    "Couldn't rename — check that you're online and the server can be reached."
+                                )
+                            }
+                        }
+                    },
+                ) {
+                    if (renameInFlight) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showRenameDialog = false },
+                    enabled = !renameInFlight,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.labelLarge)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = MaterialTheme.colorScheme.primary,
+                checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
         )
     }
 }

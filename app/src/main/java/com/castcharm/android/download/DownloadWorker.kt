@@ -259,7 +259,7 @@ class DownloadWorker(
             // the read deadline — without this, a large file or slow connection
             // would time out mid-stream after the default 10s idle window.
             val client = OkHttpClient.Builder()
-                .cookieJar(PersistentCookieJar(applicationContext))
+                .cookieJar(PersistentCookieJar.getInstance(applicationContext))
                 .addInterceptor(ApiKeyInterceptor(applicationContext))
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -370,14 +370,19 @@ class DownloadWorker(
             // row in a single transaction. This prevents any window where the
             // episode shows as "downloaded" but the queue row still exists (or
             // vice versa), which would confuse kickQueue() on the next cycle.
+            val finalSize = downloadFile.length()
             db.withTransaction {
                 episodeDao.updateDownloadComplete(
                     episodeId = episodeId,
                     localPath = downloadFile.absolutePath,
-                    localSizeBytes = downloadFile.length()
+                    localSizeBytes = finalSize
                 )
                 downloadDao.deleteByEpisodeId(episodeId)
             }
+            // Record for the "downloaded this month" indicator on the
+            // Downloads screen. Kept out of the transaction so a DataStore
+            // hiccup can't roll back the completed download.
+            BandwidthTracker.record(applicationContext, finalSize)
 
             completedSuccessfully = true
             // Clear partialFile so the catch blocks don't attempt to delete

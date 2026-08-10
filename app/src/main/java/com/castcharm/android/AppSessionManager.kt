@@ -35,6 +35,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 // Internal result of the one-time auth check against the configured server URL.
 // Only used within AppSessionManager; callers receive the public AppAuthState instead.
@@ -467,24 +469,38 @@ class AppSessionManager(
 // stopped working — most likely revoked from the server's client list. Without it
 // the dead key would survive the re-login and trap the user in a loop of signing
 // in, being rejected, and signing in again.
+//
+// Guarded by a process-wide Mutex so two concurrent callers (startup path +
+// user retry, or overlapping ViewModel scopes) don't both hit exchangeKey and
+// create two rows on the server for the same device.
+private val enrolmentMutex = Mutex()
+
 suspend fun ensureApiKey(context: Context, force: Boolean = false): Boolean {
-    // hasKey reads a cache that is empty until load() runs, so load first —
-    // otherwise a device that already holds a key would enrol a duplicate.
-    AuthStore.load(context)
-    if (force) AuthStore.clear(context)
-    if (AuthStore.hasKey) return true
-    return try {
-        val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
-            .filter { it.isNotBlank() }
-            .joinToString(" ")
-            .ifBlank { "Android device" }
-        val created = CastCharmApp.apiClient.getApi()
-            .exchangeKey(ExchangeKeyRequest(deviceName))
-        AuthStore.save(context, created.key)
-        Log.i("AppSessionManager", "Enrolled API key '${created.name}' for this device")
-        true
-    } catch (e: Exception) {
-        Log.i("AppSessionManager", "API key enrolment unavailable, staying on cookie auth", e)
-        false
+    return enrolmentMutex.withLock {
+        // hasKey reads a cache that is empty until load() runs, so load first —
+        // otherwise a device that already holds a key would enrol a duplicate.
+        AuthStore.load(context)
+        if (force) AuthStore.clear(context)
+        if (AuthStore.hasKey) return@withLock true
+        try {
+            val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
+                .ifBlank { "Android device" }
+            val created = CastCharmApp.apiClient.getApi()
+                .exchangeKey(ExchangeKeyRequest(deviceName))
+            AuthStore.save(
+                context,
+                key = created.key,
+                id = created.id,
+                prefix = created.key_prefix,
+                name = created.name,
+            )
+            Log.i("AppSessionManager", "Enrolled API key '${created.name}' for this device")
+            true
+        } catch (e: Exception) {
+            Log.i("AppSessionManager", "API key enrolment unavailable, staying on cookie auth", e)
+            false
+        }
     }
 }

@@ -77,6 +77,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.db.entities.EpisodeEntity
+import com.castcharm.android.download.BandwidthTracker
 import com.castcharm.android.ui.settings.formatBytes
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.EpisodeCard
@@ -92,6 +93,9 @@ fun DownloadsScreen(
     val uiState by viewModel.uiState.collectAsState()
     val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
     val isOfflineMode = CastCharmApp.isOfflineMode
+    val bandwidth by BandwidthTracker
+        .observe(CastCharmApp.instance)
+        .collectAsState(initial = com.castcharm.android.download.BandwidthUsage(0L, ""))
     val scope = rememberCoroutineScope()
     val baseUrl = if (CastCharmApp.apiClient.isInitialized) {
         CastCharmApp.apiClient.getBaseUrl()
@@ -279,6 +283,14 @@ fun DownloadsScreen(
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding())
         ) {
+            if (bandwidth.bytes > 0L) {
+                Text(
+                    text = "Downloaded this month: ${formatBytes(bandwidth.bytes)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
             when {
                 uiState.isInitialLoading &&
                         uiState.downloadedFeeds.isEmpty() &&
