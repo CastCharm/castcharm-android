@@ -52,7 +52,10 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
     private val storageManager = StorageManager(CastCharmApp.instance)
 
     init {
-        loadFeedAndEpisodes()
+        // Sets up DB observation only. The server pull is triggered once, by the
+        // screen's ON_RESUME observer (OnScreenResumed in MainActivity), so that
+        // arriving at this screen produces exactly one refresh.
+        observeLocalData()
     }
 
     private fun feedRepositoryOrNull(): FeedRepository? {
@@ -77,7 +80,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         }
     }
 
-    private fun loadFeedAndEpisodes() {
+    private fun observeLocalData() {
         viewModelScope.launch {
             Log.d("EpisodeListViewModel", "Starting collection for feed $feedId")
             // Combine the episodes list with the downloads table so that any
@@ -109,29 +112,30 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
             }
         }
 
+        // Show the cached feed header straight away; refresh() replaces it with
+        // server data moments later.
         viewModelScope.launch {
             try {
-                val localFeed = db.feedDao().getFeedOnce(feedId)
-                _uiState.update { it.copy(feed = localFeed) }
-
-                if (!CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized) {
-                    feedRepositoryOrNull()
-                }
+                _uiState.update { it.copy(feed = db.feedDao().getFeedOnce(feedId)) }
             } catch (e: Exception) {
                 Log.e("EpisodeListViewModel", "Failed to load feed info", e)
             }
         }
-
-        refreshEpisodes()
-        refreshPlaylistMemberships()
     }
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }
 
-    fun reloadFromDb() {
-        // Flow-backed already.
+    /**
+     * Pull this feed's data from the server. Called by the screen's ON_RESUME
+     * observer, so it runs on first arrival and again whenever the user comes back
+     * to the screen. Distinct from syncFeed(), which asks the server to re-read the
+     * podcast's RSS feed and is wired to pull-to-refresh.
+     */
+    fun refresh() {
+        refreshEpisodes()
+        refreshPlaylistMemberships()
     }
 
     fun refreshEpisodes() {

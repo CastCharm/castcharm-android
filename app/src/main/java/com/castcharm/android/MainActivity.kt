@@ -577,6 +577,27 @@ private fun OnScreenResumed(
     }
 }
 
+/**
+ * Runs [onOnline] when the app transitions from offline back to online while this
+ * screen is showing.
+ *
+ * Screens whose resume handler is gated on being online would otherwise sit on
+ * cached data until the user navigated away and back. The previous code got this
+ * behaviour by accident — isOfflineMode was part of a DisposableEffect key, so
+ * flipping it re-registered a lifecycle observer and replayed ON_RESUME. That
+ * replay was the same mechanism causing spurious double-refreshes, so the
+ * transition is now handled explicitly instead.
+ */
+@Composable
+private fun OnReturnedOnline(isOfflineMode: Boolean, onOnline: () -> Unit) {
+    val currentOnOnline by rememberUpdatedState(onOnline)
+    var wasOffline by remember { mutableStateOf(isOfflineMode) }
+    LaunchedEffect(isOfflineMode) {
+        if (wasOffline && !isOfflineMode) currentOnOnline()
+        wasOffline = isOfflineMode
+    }
+}
+
 // Main scaffold: NavHost + bottom nav bar + mini player bar. Shown when the user
 // is fully logged in. Each screen's data load is triggered from exactly one place,
 // OnScreenResumed, rather than from both the ViewModel's init and a lifecycle
@@ -700,6 +721,7 @@ fun MainScaffold(
                         OnScreenResumed(backStackEntry.lifecycle) {
                             if (!offlineNow) feedVm.refreshFeeds()
                         }
+                        OnReturnedOnline(isOfflineMode) { feedVm.refreshFeeds() }
 
                         FeedListScreen(
                             viewModel = feedVm,
@@ -790,8 +812,9 @@ fun MainScaffold(
 
                         val offlineNow by rememberUpdatedState(isOfflineMode)
                         OnScreenResumed(backStackEntry.lifecycle) {
-                            if (!offlineNow) vm.reloadFromDb()
+                            if (!offlineNow) vm.refresh()
                         }
+                        OnReturnedOnline(isOfflineMode) { vm.refresh() }
 
                         EpisodeListScreen(
                             feedId = feedId,
