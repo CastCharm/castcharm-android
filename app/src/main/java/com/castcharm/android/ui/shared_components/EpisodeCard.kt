@@ -1,7 +1,7 @@
 package com.castcharm.android.ui.shared_components
 
 // EpisodeCard is the shared expandable episode row used in EpisodeListScreen,
-// DashboardScreen, and DownloadsScreen. It handles the full episode interaction
+// DownloadsScreen, and PlaylistDetailScreen. It handles the full episode interaction
 // surface: artwork, title, metadata row (date / duration / download indicator /
 // resume badge), a 2dp progress bar, and an animated action panel that expands on
 // tap to show Play / Mark Played / download action buttons and the episode description.
@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
@@ -105,11 +106,6 @@ fun EpisodeCard(
     baseUrl: String,
     feedImageUrl: String? = null,
     isSelected: Boolean = false,
-    // True whenever multi-select is active, regardless of whether *this* row is
-    // picked. Lets unselected rows show an empty checkbox, so the distinction is
-    // between two obviously different marks rather than a background tint the user
-    // has to hunt for.
-    selectionActive: Boolean = false,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onLongPress: (() -> Unit)? = null,
@@ -121,7 +117,13 @@ fun EpisodeCard(
     downloadActionOverride: EpisodeDownloadActionOverride? = null,
     onAddToPlaylist: (() -> Unit)? = null,
     isInPlaylist: Boolean = false,
-    enablePlaylists: Boolean = true
+    enablePlaylists: Boolean = true,
+    // True whenever multi-select is active, regardless of whether *this* row is
+    // picked. Lets unselected rows show an empty checkbox, so the distinction is
+    // between two obviously different marks rather than a background tint the user
+    // has to hunt for. Appended rather than slotted next to isSelected so adding it
+    // did not shuffle the positional argument order of a component with six callers.
+    selectionActive: Boolean = false,
 ) {
     // Resolve artwork URL through a four-level fallback chain:
     // 1. Episode-specific custom image (set by the user or override)
@@ -204,10 +206,16 @@ fun EpisodeCard(
                     )
 
                     if (selectionActive) {
+                        // Both marks sit on an OPAQUE disc. Anything translucent
+                        // composites against whatever cover art happens to be
+                        // underneath, so its contrast is unknowable at author time —
+                        // a translucent accent wash with a white tick measured
+                        // 1.2:1 on Cyberpunk over light artwork, i.e. invisible,
+                        // which is the very problem this indicator exists to solve.
                         if (isSelected) {
-                            // Picked rows light up: the whole thumbnail takes an
-                            // accent wash so they stand out at a glance while
-                            // scanning the list.
+                            // Accent wash over the whole thumbnail so picked rows are
+                            // obvious when scanning, plus a solid primary disc that
+                            // gives the tick a known background to sit on.
                             Box(
                                 modifier = Modifier
                                     .matchParentSize()
@@ -216,31 +224,44 @@ fun EpisodeCard(
                                         MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
                                     )
                             )
-                        } else {
-                            // Unselected rows deliberately keep their artwork
-                            // untouched — washing out every thumbnail the moment
-                            // multi-select opens makes the list look broken. Just a
-                            // small backdrop so the ring reads over busy cover art.
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.Center)
                                     .size(26.dp)
                                     .clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.45f))
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                // The theme computes onPrimary from the primary's
+                                // luminance for exactly this purpose, so it is
+                                // legible on every one of the shipped themes.
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(18.dp)
+                            )
+                        } else {
+                            // Unselected rows keep their artwork — washing out every
+                            // thumbnail the moment multi-select opens makes the list
+                            // look broken. Only the ring gets a backdrop.
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                            )
+                            Icon(
+                                imageVector = Icons.Default.RadioButtonUnchecked,
+                                contentDescription = "Not selected",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
                             )
                         }
-                        Icon(
-                            imageVector = if (isSelected) {
-                                Icons.Default.CheckCircle
-                            } else {
-                                Icons.Default.RadioButtonUnchecked
-                            },
-                            contentDescription = if (isSelected) "Selected" else "Not selected",
-                            tint = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .size(26.dp)
-                        )
                     }
                 }
 

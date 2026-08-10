@@ -37,3 +37,6 @@ google-services.json
 get-public-key.bat
 img/*
 launch-DHU.bat
+
+# Kotlin compile daemon session files
+.kotlin/
