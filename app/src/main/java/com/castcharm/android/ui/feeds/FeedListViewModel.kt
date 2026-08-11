@@ -45,8 +45,14 @@ data class FeedListUiState(
     // podcast's files. The dialog turns into a prompt so the user decides: pick a
     // different folder name, or use the existing one deliberately.
     val addFeedFolderConflict: FolderConflict? = null,
-    // Feed IDs picked via long-press. Non-empty means the screen is in multi-select.
+    // Feed IDs picked via long-press.
     val selectedFeeds: Set<Int> = emptySet(),
+    // Tracked separately from selectedFeeds being non-empty: an empty selection is
+    // a valid place to sit. "Select none" and unticking the last card leave the
+    // action bar up rather than dropping the user back to browsing and making them
+    // long-press all over again. Exits are the X in the top bar, back, or a
+    // finished bulk action.
+    val feedSelectionMode: Boolean = false,
     // A bulk operation is running; the action bar disables itself so a second tap
     // can't fire the same server-side work twice.
     val bulkActionInFlight: Boolean = false,
@@ -146,17 +152,25 @@ class FeedListViewModel : ViewModel() {
 
     // ---- Multi-select -------------------------------------------------------
 
+    // Also the entry point into multi-select: the first long-press lands here.
     fun toggleFeedSelection(feedId: Int) {
         val current = _uiState.value.selectedFeeds
         _uiState.update {
             it.copy(
-                selectedFeeds = if (feedId in current) current - feedId else current + feedId
+                selectedFeeds = if (feedId in current) current - feedId else current + feedId,
+                feedSelectionMode = true
             )
         }
     }
 
+    /** Empties the selection but stays in multi-select ("Select none"). */
     fun clearFeedSelection() {
         _uiState.update { it.copy(selectedFeeds = emptySet()) }
+    }
+
+    /** Leaves multi-select entirely — the X in the top bar, back, or a finished batch. */
+    fun exitFeedSelectionMode() {
+        _uiState.update { it.copy(selectedFeeds = emptySet(), feedSelectionMode = false) }
     }
 
     fun selectAllFeeds() {
@@ -168,7 +182,8 @@ class FeedListViewModel : ViewModel() {
                 selectedFeeds = state.feeds
                     .map { it.id }
                     .filterNot { it in state.deletingFeeds }
-                    .toSet()
+                    .toSet(),
+                feedSelectionMode = true
             )
         }
     }
@@ -204,6 +219,7 @@ class FeedListViewModel : ViewModel() {
                 it.copy(
                     bulkActionInFlight = true,
                     selectedFeeds = emptySet(),
+                    feedSelectionMode = false,
                     deletingFeeds = if (markDeleting) it.deletingFeeds + ids else it.deletingFeeds,
                 )
             }

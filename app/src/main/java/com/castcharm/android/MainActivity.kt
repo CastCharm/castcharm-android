@@ -14,6 +14,7 @@ package com.castcharm.android
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -365,8 +367,22 @@ fun CastCharmNavigation() {
             AppAuthState.Checking -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(16.dp))
+                        // The launcher art with the progress ring drawn around it,
+                        // rather than a bare spinner. This is the first frame of a
+                        // cold start and it can sit here for a couple of seconds on a
+                        // slow LAN, so it may as well say which app is starting.
+                        Box(contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(96.dp),
+                                strokeWidth = 3.dp
+                            )
+                            Image(
+                                painter = painterResource(id = R.drawable.icon_no_bg),
+                                contentDescription = null,
+                                modifier = Modifier.size(60.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(20.dp))
                         Text("Connecting...", style = MaterialTheme.typography.bodyLarge)
                     }
                 }

@@ -15,6 +15,7 @@
 
 package com.castcharm.android.ui.episodes
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -38,14 +39,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -168,7 +168,12 @@ fun EpisodeListScreen(
             .first { it > idx + 1 }
         listState.animateScrollToItem(idx + 1)
     }
-    val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
+    val isSelectionMode = uiState.selectionMode
+
+    // Multi-select no longer ends on its own when the selection empties, so back
+    // has to be an explicit way out of it — otherwise the only exit is the X and
+    // back would drop the user off the screen entirely mid-batch.
+    BackHandler(enabled = isSelectionMode) { viewModel.exitSelectionMode() }
     var showDownloadConfirm by remember { mutableStateOf(false) }
     var showDeleteDownloadsConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
@@ -269,18 +274,24 @@ fun EpisodeListScreen(
     val allSelected = uiState.episodes.isNotEmpty() &&
         uiState.episodes.all { it.id in uiState.selectedEpisodes }
 
+    // The selection can now legitimately be empty while the bar is still up (see
+    // selectionMode in EpisodeListUiState), so every action that operates on the
+    // picked rows has to be greyed out rather than quietly doing nothing.
+    val anySelected = uiState.selectedEpisodes.isNotEmpty()
+
     // Hands these to MainScaffold, which shows them in place of the tab bar.
     ProvideSelectionActions(
         active = isSelectionMode,
         allSelected,
         allSelectedPlayed,
         anySelectedDownloaded,
+        anySelected,
     ) {
         listOf(
             // Flips to "Select none" once everything is picked — an always-on
-            // "Select all" is a dead button at that point. Deselecting everything
-            // leaves the selection empty, which is what ends selection mode, so this
-            // doubles as a second way out alongside the X in the top bar.
+            // "Select all" is a dead button at that point. "Select none" only
+            // empties the selection; leaving multi-select is the X in the top bar,
+            // so unticking everything doesn't force a fresh long-press to get back in.
             SelectionAction(
                 icon = if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
                 label = if (allSelected) "Select none" else "Select all",
@@ -288,19 +299,21 @@ fun EpisodeListScreen(
                     if (allSelected) viewModel.clearSelection() else viewModel.selectAll()
                 }
             ),
+            // Same bare tick in both directions, matching the per-episode card:
+            // the label carries the direction, and the row markers show the
+            // resulting state. A ringed vs. un-ringed tick here would collide
+            // with the meaning those two glyphs now carry on the cards.
             SelectionAction(
-                icon = if (allSelectedPlayed) {
-                    Icons.Default.RadioButtonUnchecked
-                } else {
-                    Icons.Default.CheckCircle
-                },
+                icon = Icons.Default.Check,
                 label = if (allSelectedPlayed) "Mark unplayed" else "Mark played",
-                onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) }
+                onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) },
+                enabled = anySelected
             ),
             SelectionAction(
                 icon = Icons.Default.PhoneAndroid,
                 label = "Download",
-                onClick = { showDownloadConfirm = true }
+                onClick = { showDownloadConfirm = true },
+                enabled = anySelected
             ),
             SelectionAction(
                 icon = Icons.Default.DeleteForever,
@@ -329,8 +342,8 @@ fun EpisodeListScreen(
                 },
                 navigationIcon = {
                     if (isSelectionMode) {
-                        IconButton(onClick = { viewModel.clearSelection() }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        IconButton(onClick = { viewModel.exitSelectionMode() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Exit selection")
                         }
                     } else {
                         IconButton(onClick = onNavigateBack) {

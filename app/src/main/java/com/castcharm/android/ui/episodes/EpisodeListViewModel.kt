@@ -40,6 +40,13 @@ data class EpisodeListUiState(
     val errorMessage: String? = null,
     val hasMore: Boolean = false,
     val selectedEpisodes: Set<Int> = emptySet(),
+    // Tracked separately from selectedEpisodes being non-empty. An empty
+    // selection is a legitimate state to sit in — "Select none" and unticking
+    // the last row should leave the user in multi-select with the bar still up,
+    // not silently kick them back to browsing and force another long-press.
+    // Leaving multi-select is an explicit act: the X in the top bar, or
+    // finishing a bulk action.
+    val selectionMode: Boolean = false,
     val playlistMemberEpisodeIds: Set<Int> = emptySet()
 )
 
@@ -341,22 +348,33 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         }
     }
 
+    // Also the entry point into multi-select: the first long-press lands here.
     fun toggleEpisodeSelection(episodeId: Int) {
         val current = _uiState.value.selectedEpisodes
         _uiState.update {
             it.copy(
-                selectedEpisodes = if (episodeId in current) current - episodeId else current + episodeId
+                selectedEpisodes = if (episodeId in current) current - episodeId else current + episodeId,
+                selectionMode = true
             )
         }
     }
 
+    /** Empties the selection but stays in multi-select ("Select none"). */
     fun clearSelection() {
         _uiState.update { it.copy(selectedEpisodes = emptySet()) }
     }
 
+    /** Leaves multi-select entirely — the X in the top bar, or a finished batch. */
+    fun exitSelectionMode() {
+        _uiState.update { it.copy(selectedEpisodes = emptySet(), selectionMode = false) }
+    }
+
     fun selectAll() {
         _uiState.update {
-            it.copy(selectedEpisodes = it.episodes.map { episode -> episode.id }.toSet())
+            it.copy(
+                selectedEpisodes = it.episodes.map { episode -> episode.id }.toSet(),
+                selectionMode = true
+            )
         }
     }
 
@@ -365,7 +383,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
             _uiState.value.selectedEpisodes.forEach { id ->
                 downloadScheduler.scheduleDownload(id)
             }
-            clearSelection()
+            exitSelectionMode()
         }
     }
 
@@ -382,7 +400,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                     togglePlayed(id, current)
                 }
             }
-            clearSelection()
+            exitSelectionMode()
         }
     }
 
@@ -395,7 +413,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
             _uiState.value.selectedEpisodes.forEach { id ->
                 runCatching { storageManager.deleteLocalFile(id) }
             }
-            clearSelection()
+            exitSelectionMode()
         }
     }
 

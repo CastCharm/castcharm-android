@@ -12,6 +12,7 @@
 // EmptyScreen: shown when the server has no feeds yet (fresh server setup).
 package com.castcharm.android.ui.feeds
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -169,7 +170,12 @@ fun FeedListScreen(
         }
     }
 
-    val isSelectionMode = uiState.selectedFeeds.isNotEmpty()
+    val isSelectionMode = uiState.feedSelectionMode
+
+    // Multi-select no longer ends on its own when the selection empties, so back
+    // has to be an explicit way out of it.
+    BackHandler(enabled = isSelectionMode) { viewModel.exitFeedSelectionMode() }
+
     // Feeds being deleted are inert, so they are excluded from "all" in both
     // directions — selectAllFeeds() skips them, and this must agree or the label
     // could never flip to "Select none" while a deletion is in flight.
@@ -191,10 +197,15 @@ fun FeedListScreen(
         )
     }
 
+    // The selection can now legitimately be empty while the bar is still up, so
+    // the bulk actions have to grey out rather than quietly do nothing.
+    val anySelected = uiState.selectedFeeds.isNotEmpty()
+    val bulkEnabled = anySelected && !uiState.bulkActionInFlight
+
     ProvideSelectionActions(
         active = isSelectionMode,
         allSelected,
-        uiState.bulkActionInFlight,
+        bulkEnabled,
     ) {
         listOf(
             SelectionAction(
@@ -208,13 +219,13 @@ fun FeedListScreen(
                 icon = Icons.Default.Refresh,
                 label = "Sync",
                 onClick = { viewModel.syncSelectedFeeds() },
-                enabled = !uiState.bulkActionInFlight
+                enabled = bulkEnabled
             ),
             SelectionAction(
                 icon = Icons.Default.DeleteForever,
                 label = "Delete",
                 onClick = { showDeleteFeedsConfirm = true },
-                enabled = !uiState.bulkActionInFlight,
+                enabled = bulkEnabled,
                 destructive = true
             ),
         )
@@ -234,8 +245,8 @@ fun FeedListScreen(
                 },
                 navigationIcon = {
                     if (isSelectionMode) {
-                        IconButton(onClick = { viewModel.clearFeedSelection() }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        IconButton(onClick = { viewModel.exitFeedSelectionMode() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Exit selection")
                         }
                     }
                 },

@@ -1,5 +1,6 @@
 package com.castcharm.android.ui.login
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Visibility
@@ -8,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -19,6 +21,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.castcharm.android.R
 
 // LoginScreen is shown when AppSessionManager reports NotLoggedIn. It collects
 // three inputs (server URL, username, password) and delegates to LoginViewModel.login().
@@ -48,7 +51,19 @@ fun LoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // Logo
+        // Logo. The launcher icon is the only thing in the app that carries the
+        // "charm" half of the name, and the login screen is the first thing a new
+        // install shows — so it appears here rather than leaving the brand as a
+        // bare wordmark. icon_no_bg is the same source art the launcher and the
+        // top bar use, so all three stay in step if it is ever redrawn.
+        Image(
+            painter = painterResource(id = R.drawable.icon_no_bg),
+            contentDescription = null,
+            modifier = Modifier
+                .size(96.dp)
+                .padding(bottom = 12.dp)
+        )
+
         Text(
             text = "CastCharm",
             style = MaterialTheme.typography.headlineLarge.copy(

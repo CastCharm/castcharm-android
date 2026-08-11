@@ -34,10 +34,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -303,6 +303,38 @@ fun EpisodeCard(
                             )
                         }
 
+                        // Played marker, sitting right after the date. This is the
+                        // single place played status is stated. It used to be carried
+                        // by the accent progress bar along the bottom edge of the card,
+                        // which multi-select then wiped out — the selected-row border
+                        // runs along that same edge in the same accent colour, so the
+                        // moment you started picking rows you could no longer tell what
+                        // you had already heard. An icon inside the row is unaffected
+                        // by the border and reads the same in every theme.
+                        //
+                        // Ring vs. ticked ring: the ring is only worth drawing for
+                        // episodes that are actually to hand, so it means "downloaded,
+                        // not listened yet" rather than adding a marker to every row in
+                        // the list. Played always gets its tick.
+                        val isDownloaded =
+                            actionState == EpisodeDownloadActionOverride.ON_PHONE ||
+                                actionState == EpisodeDownloadActionOverride.SAVE_TO_PHONE
+                        if (episode.played) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = "Played",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        } else if (isDownloaded) {
+                            Icon(
+                                Icons.Default.RadioButtonUnchecked,
+                                contentDescription = "Not played",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
                         if (episode.duration != null) {
                             Text(
                                 text = formatDuration(episode.duration),
@@ -324,8 +356,13 @@ fun EpisodeCard(
                             }
 
                             EpisodeDownloadActionOverride.SAVE_TO_PHONE -> {
+                                // Deliberately not DownloadDone: that glyph is a bare
+                                // tick over a line, and the played marker a few pixels
+                                // to the left is now the row's tick. Two checkmarks
+                                // meaning different things in one row is exactly the
+                                // confusion this pass is undoing.
                                 Icon(
-                                    Icons.Default.DownloadDone,
+                                    Icons.Default.Cloud,
                                     contentDescription = "Downloaded to Server",
                                     modifier = Modifier.size(14.dp),
                                     tint = MaterialTheme.colorScheme.primary
@@ -415,9 +452,12 @@ fun EpisodeCard(
             }
 
             // 2dp playback progress bar at the bottom of the collapsed header row.
-            // Only shown when the user has started listening but hasn't finished.
+            // Only shown when the user has started listening but hasn't finished:
+            // once played, a full-width accent bar along the bottom edge reads as a
+            // highlight rather than as progress, and it competes with the selected-row
+            // border. The tick in the metadata row states played instead.
             // coerceIn guards against server data where position > duration.
-            if (episode.play_position_seconds > 0 && episode.duration != null && episode.duration > 0) {
+            if (!episode.played && episode.play_position_seconds > 0 && episode.duration != null && episode.duration > 0) {
                 LinearProgressIndicator(
                     progress = { (episode.play_position_seconds.toFloat() / episode.duration).coerceIn(0f, 1f) },
                     modifier = Modifier
@@ -455,11 +495,16 @@ fun EpisodeCard(
                             onClick = onPlay
                         )
 
-                        // Toggle played/unplayed. The icon and tint switch to signal the
-                        // current state — filled CheckCircle + primary colour when played.
+                        // Toggle played/unplayed. A bare tick in both directions, tinted
+                        // to say which way it goes: accent while played (tap to undo),
+                        // muted while unplayed (tap to mark). The ringed glyphs are
+                        // reserved for the status markers in the metadata row above —
+                        // reusing them on an action button made the button look like a
+                        // state readout, which is why it read as "Played" rather than
+                        // as something you could press.
                         EpisodeActionButton(
-                            icon = if (episode.played) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            label = if (episode.played) "Played" else "Mark Played",
+                            icon = Icons.Default.Check,
+                            label = if (episode.played) "Mark Unplayed" else "Mark Played",
                             tint = if (episode.played) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             onClick = onTogglePlayedStatus
                         )
