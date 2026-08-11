@@ -16,6 +16,9 @@
 package com.castcharm.android.ui.episodes
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -40,6 +43,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Deselect
@@ -64,6 +68,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -73,12 +78,18 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -103,18 +114,6 @@ import com.castcharm.android.ui.shared_components.OfflineModePanel
 import com.castcharm.android.ui.shared_components.PlaceholderArtwork
 import com.castcharm.android.ui.shared_components.ReconnectIconButton
 import com.castcharm.android.ui.shared_components.stripHtml
-
-// Client-side visibility filter applied to the loaded episode list. The list of
-// episodes itself is not re-fetched — filtering just narrows what the LazyColumn
-// renders. The selection is intentionally not persisted across visits: episode
-// screens are visited transiently and a "sticky" filter is more surprising than
-// helpful.
-private enum class EpisodeFilter(val label: String) {
-    ALL("All"),
-    UNPLAYED("Unplayed"),
-    DOWNLOADED("Downloaded"),
-    IN_PROGRESS("In progress"),
-}
 
 @Composable
 fun EpisodeListScreen(
@@ -141,34 +140,96 @@ fun EpisodeListScreen(
     var expandedEpisodeId by remember { mutableStateOf<Int?>(highlightEpisodeId) }
     val listState = rememberLazyListState()
     var addToPlaylistSheetEpisodeId by remember { mutableStateOf<Int?>(null) }
+    val isSelectionMode = uiState.selectionMode
+
+    // Items the LazyColumn draws before the first episode: the feed header, and
+    // the filter chips when not in multi-select. Episode N lives at list index
+    // N + this, which both the jump and the window tracking need to agree on.
+    val headerItemCount = (if (feed != null) 1 else 0) + (if (!isSelectionMode) 1 else 0)
+    // The jump effect below outlives changes to this count — the feed header
+    // appears as soon as the cached feed row loads, which can land after the
+    // effect has started — so it reads the current value rather than whatever was
+    // in scope when it launched, and does not restart (and re-scroll) when the
+    // count changes.
+    val currentHeaderCount by rememberUpdatedState(headerItemCount)
+
+    // Jumping to an episode from the dashboard or from search.
+    //
+    // This used to be a hunt: widen the loaded window, look for the episode, widen
+    // again — thousands of records and a dozen round trips to reach something a few
+    // hundred back, and a "sorry, too far back" message when it gave up. The feed's
+    // id index makes the position a lookup, and every row exists as a placeholder
+    // from the start, so the jump is immediate and the episode loads once it is on
+    // screen.
+    // The jump is a one-shot, not a property of the screen.
+    //
+    // highlightEpisodeId comes from the navigation route and therefore never
+    // changes while this screen is on the back stack — but a LaunchedEffect
+    // re-runs whenever the composable re-enters composition, which happens every
+    // time something is shown over the list and then dismissed. Closing the player
+    // was enough to fire it again and yank the user back to the deep-linked
+    // episode, discarding wherever they had scrolled to since.
+    //
+    // rememberSaveable rather than remember: the navigation entry keeps its saved
+    // state, so this survives the re-entry that caused the bug, and a rotation
+    // too. Keyed on the id so arriving from a NEW deep link re-arms it.
+    var hasJumpedToHighlight by rememberSaveable(highlightEpisodeId) { mutableStateOf(false) }
 
     LaunchedEffect(highlightEpisodeId) {
-        if (highlightEpisodeId == null) return@LaunchedEffect
-        val idx = withTimeoutOrNull(30_000) {
-            // Wait for both the DB load and the API refresh to finish.
-            // hasMore is only populated after the API call returns, so checking
-            // only !isInitialLoading exits the loop too early with hasMore=false.
-            viewModel.uiState.first { !it.isInitialLoading && !it.isRefreshing }
-            // Walk through pages until the episode is found or there are no more
-            while (true) {
-                val state = viewModel.uiState.value
-                val foundIdx = state.episodes.indexOfFirst { it.id == highlightEpisodeId }
-                if (foundIdx >= 0) return@withTimeoutOrNull foundIdx
-                if (!state.hasMore) break
-                val prevSize = state.episodes.size
-                viewModel.loadMore()
-                // Wait for this page to land before checking again
-                viewModel.uiState.first { !it.isRefreshing && (it.episodes.size != prevSize || !it.hasMore) }
-            }
-            null
-        } ?: return@LaunchedEffect
-        // Wait until the LazyColumn has laid out enough items to reach this index.
-        // +1 accounts for the feed header item at position 0.
+        if (highlightEpisodeId == null || hasJumpedToHighlight) return@LaunchedEffect
+        // Two different failures, told apart rather than collapsed into one
+        // message: the feed never loaded, or it loaded and this episode is not in
+        // it. Reporting a slow network as "that episode is gone" sends the user
+        // looking for a problem that is not there.
+        val loaded = withTimeoutOrNull(20_000) {
+            viewModel.uiState.first { it.orderedIds.isNotEmpty() }
+        } != null
+        if (!loaded) {
+            viewModel.showMessage("Couldn't load this podcast in time to jump to that episode.")
+            return@LaunchedEffect
+        }
+        val idx = viewModel.indexOfEpisode(highlightEpisodeId)
+        if (idx < 0) {
+            viewModel.showMessage("That episode isn't in this podcast any more.")
+            return@LaunchedEffect
+        }
+        // Marked before the scroll, not after: both outcomes count as having had
+        // our one go at it, and a cancellation partway through must not leave the
+        // jump armed to fire again later.
+        hasJumpedToHighlight = true
+        // Wait for the LazyColumn to lay out that far. With placeholders this is
+        // the next frame rather than however long the network takes.
         snapshotFlow { listState.layoutInfo.totalItemsCount }
-            .first { it > idx + 1 }
-        listState.animateScrollToItem(idx + 1)
+            .first { it > idx + currentHeaderCount }
+        listState.scrollToItem(idx + currentHeaderCount)
     }
-    val isSelectionMode = uiState.selectionMode
+
+    // Set while the jump-to-top animation is running. The window follows whatever
+    // is on screen, so without this an animated scroll from episode 1,500 would
+    // drag it across every position on the way up and fetch a page for each —
+    // hundreds of requests for episodes the user is travelling past, not reading.
+    // The window is moved once, on arrival, instead.
+    var scrollingToTop by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    // Keep the loaded window following the user. Distinct from what is drawn: the
+    // list always draws every episode in the feed, this decides which ones are
+    // held in memory with their content filled in.
+    LaunchedEffect(listState, uiState.orderedIds.size, headerItemCount) {
+        snapshotFlow {
+            val info = listState.layoutInfo.visibleItemsInfo
+            if (info.isEmpty()) IntRange.EMPTY
+            else IntRange(info.first().index, info.last().index)
+        }
+            .distinctUntilChanged()
+            .collect { range ->
+                if (range.isEmpty() || scrollingToTop) return@collect
+                viewModel.onVisibleRangeChanged(
+                    (range.first - headerItemCount).coerceAtLeast(0),
+                    (range.last - headerItemCount).coerceAtLeast(0)
+                )
+            }
+    }
 
     // Multi-select no longer ends on its own when the selection empties, so back
     // has to be an explicit way out of it — otherwise the only exit is the X and
@@ -177,30 +238,29 @@ fun EpisodeListScreen(
     var showDownloadConfirm by remember { mutableStateOf(false) }
     var showDeleteDownloadsConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var filter by remember { mutableStateOf(EpisodeFilter.ALL) }
 
-    // Reset the filter when the user exits selection mode — a cleared batch
-    // should feel like a fresh view.
+    // The filter now lives in the ViewModel. It cannot be applied here any more:
+    // the screen only ever holds the visible window, so filtering that would hide
+    // every match outside it. Each filter instead re-reads the feed's ordering —
+    // from the server for played state, from Room for "Downloaded" — and the list
+    // renders the result the same way it renders the unfiltered feed.
+    val filter = uiState.filter
+
+    // Reset the filter when the user enters selection mode — a batch should start
+    // from a clean view.
     LaunchedEffect(isSelectionMode) {
-        if (isSelectionMode && filter != EpisodeFilter.ALL) filter = EpisodeFilter.ALL
+        if (isSelectionMode && filter != EpisodeFilter.ALL) viewModel.setFilter(EpisodeFilter.ALL)
     }
 
-    val visibleEpisodes = remember(uiState.episodes, filter) {
-        when (filter) {
-            EpisodeFilter.ALL -> uiState.episodes
-            EpisodeFilter.UNPLAYED -> uiState.episodes.filter { !it.played }
-            EpisodeFilter.DOWNLOADED -> uiState.episodes.filter { it.local_path != null }
-            EpisodeFilter.IN_PROGRESS -> uiState.episodes.filter {
-                !it.played && it.play_position_seconds > 0
-            }
-        }
-    }
+    val orderedIds = uiState.orderedIds
 
     // Enable the batch-delete action only if at least one selected episode
-    // actually has a file on disk to remove.
-    val anySelectedDownloaded = remember(uiState.selectedEpisodes, uiState.episodes) {
-        val selected = uiState.selectedEpisodes
-        uiState.episodes.any { it.id in selected && it.local_path != null }
+    // actually has a file on disk to remove. Checked against the feed's full set
+    // of downloads rather than the loaded window — a whole-feed selection is
+    // mostly episodes the screen has not fetched, and testing only those would
+    // grey the action out whenever the downloads happen to sit off screen.
+    val anySelectedDownloaded = remember(uiState.selectedEpisodes, uiState.downloadedEpisodeIds) {
+        uiState.selectedEpisodes.any { it in uiState.downloadedEpisodeIds }
     }
 
     if (showDownloadConfirm) {
@@ -265,14 +325,24 @@ fun EpisodeListScreen(
     // Whether "mark played" or "mark unplayed" is offered depends on the current
     // state of the selection — offering whichever change would actually alter the
     // picked rows.
-    val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
-        uiState.episodes.filter { it.id in uiState.selectedEpisodes }.all { it.played }
+    // Only claims "all played" when every selected episode is actually loaded and
+    // played. A whole-feed selection is mostly episodes the screen has not fetched,
+    // whose played state is genuinely unknown — judging from the loaded few would
+    // offer "Mark unplayed" for a feed that is mostly unplayed.
+    val allSelectedPlayed = remember(uiState.selectedEpisodes, uiState.loadedById) {
+        val loaded = uiState.selectedEpisodes.mapNotNull { uiState.loadedById[it] }
+        uiState.selectedEpisodes.isNotEmpty() &&
+            loaded.size == uiState.selectedEpisodes.size &&
+            loaded.all { it.played }
+    }
 
-    // Entering selection mode resets the filter to ALL (see the LaunchedEffect
-    // above), so the loaded list and the visible list are the same set here and
-    // "everything is selected" is unambiguous.
-    val allSelected = uiState.episodes.isNotEmpty() &&
-        uiState.episodes.all { it.id in uiState.selectedEpisodes }
+    // Against the whole feed, not the loaded window — "Select all" now selects
+    // every episode under the current filter, so anything less than that must not
+    // report itself as already selected.
+    val allSelected = remember(uiState.orderedIds, uiState.selectedEpisodes) {
+        uiState.orderedIds.isNotEmpty() &&
+            uiState.orderedIds.all { it in uiState.selectedEpisodes }
+    }
 
     // The selection can now legitimately be empty while the bar is still up (see
     // selectionMode in EpisodeListUiState), so every action that operates on the
@@ -422,7 +492,7 @@ fun EpisodeListScreen(
                 .padding(top = padding.calculateTopPadding()),
         ) {
         when {
-            uiState.isInitialLoading && uiState.episodes.isEmpty() -> {
+            uiState.isInitialLoading && orderedIds.isEmpty() -> {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
@@ -438,7 +508,7 @@ fun EpisodeListScreen(
                 }
             }
 
-            uiState.episodes.isEmpty() -> {
+            orderedIds.isEmpty() && filter == EpisodeFilter.ALL -> {
                 EmptyEpisodeScreen(modifier = Modifier)
             }
 
@@ -475,18 +545,37 @@ fun EpisodeListScreen(
                         item {
                             EpisodeFilterChips(
                                 selected = filter,
-                                onSelect = { filter = it },
+                                onSelect = { viewModel.setFilter(it) },
                             )
                         }
                     }
 
-                    if (visibleEpisodes.isEmpty()) {
+                    if (orderedIds.isEmpty()) {
                         item {
-                            EmptyFilterState(filter = filter, onClear = { filter = EpisodeFilter.ALL })
+                            EmptyFilterState(
+                                filter = filter,
+                                onClear = { viewModel.setFilter(EpisodeFilter.ALL) }
+                            )
                         }
                     }
 
-                    items(visibleEpisodes, key = { it.id }) { episode ->
+                    // A row per episode in the whole feed. Ones outside the loaded
+                    // window draw as skeletons and fill in as they scroll into
+                    // view, which is what lets the list jump straight to any
+                    // position instead of having to load its way down to it.
+                    items(
+                        count = orderedIds.size,
+                        key = { orderedIds[it] }
+                    ) { index ->
+                        // The list is the id ordering; the content is whatever the
+                        // window has loaded. LazyColumn only composes what is on
+                        // screen, so this lookup happens a couple of dozen times a
+                        // frame rather than once per episode in the podcast.
+                        val episode = uiState.loadedById[orderedIds[index]]
+                        if (episode == null) {
+                            EpisodeCardSkeleton(showSpinner = false)
+                            return@items
+                        }
                         val isSelected = episode.id in uiState.selectedEpisodes
                         val isPhoneDownloadInProgress = episode.id in uiState.activePhoneDownloadEpisodeIds
 
@@ -551,11 +640,62 @@ fun EpisodeListScreen(
                 }
             }
         }
+
+        // Jump back to the top. Only offered once the user is far enough down that
+        // scrolling back would be tedious — appearing after a couple of rows would
+        // just be something permanently in the way.
+        //
+        // Hidden during multi-select, where the bottom of the screen belongs to the
+        // batch actions.
+        val showScrollToTop by remember {
+            derivedStateOf { listState.firstVisibleItemIndex > SCROLL_TO_TOP_AFTER_ROWS }
+        }
+        AnimatedVisibility(
+            visible = showScrollToTop && !isSelectionMode,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = 16.dp)
+        ) {
+            SmallFloatingActionButton(
+                onClick = {
+                    scope.launch {
+                        scrollingToTop = true
+                        try {
+                            // Animating the whole way from deep in a feed makes
+                            // Compose measure and lay out every row it travels
+                            // past, which is what the stutter was. Jump the bulk
+                            // of the distance instantly, then animate only the
+                            // last screenful or so — the part the eye actually
+                            // follows — so it reads as a smooth glide to the top
+                            // however far down the user started.
+                            if (listState.firstVisibleItemIndex > SCROLL_TO_TOP_RUNWAY) {
+                                listState.scrollToItem(SCROLL_TO_TOP_RUNWAY)
+                            }
+                            listState.animateScrollToItem(0)
+                        } finally {
+                            // Cleared before the window is moved, and in a finally so
+                            // an interrupted animation cannot leave hydration switched
+                            // off for the rest of the screen's life.
+                            scrollingToTop = false
+                            viewModel.onVisibleRangeChanged(0, 0)
+                        }
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            ) {
+                Icon(
+                    Icons.Default.KeyboardArrowUp,
+                    contentDescription = "Scroll to top",
+                )
+            }
+        }
         }
     }
 
     addToPlaylistSheetEpisodeId?.let { epId ->
-        val ep = uiState.episodes.find { it.id == epId }
+        val ep = uiState.loadedById[epId]
         AddToPlaylistSheet(
             episodeId = epId,
             episodeTitle = ep?.title ?: "",

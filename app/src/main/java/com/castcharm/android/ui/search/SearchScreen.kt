@@ -44,6 +44,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.ServerLimits
 import com.castcharm.android.data.api.models.EpisodeOut
 import com.castcharm.android.data.api.models.parseServerDateTime
 import com.castcharm.android.data.db.AppDatabase
@@ -217,7 +218,10 @@ fun SearchScreen(
         ) {
             OutlinedTextField(
                 value = uiState.query,
-                onValueChange = { viewModel.setQuery(it) },
+                // Capped to whatever this server accepts. Past its limit the
+                // server answers 422, which would look to the user like search
+                // breaking rather than a term nobody could have meant to type.
+                onValueChange = { viewModel.setQuery(it.take(ServerLimits.current.maxSearchLen)) },
                 placeholder = { Text("Search episodes…") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {

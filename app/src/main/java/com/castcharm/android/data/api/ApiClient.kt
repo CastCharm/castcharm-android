@@ -58,6 +58,11 @@ class ApiClient(private val context: Context) {
         }
 
         baseUrl = normalizedBaseUrl
+        // Reaching here means the server actually changed — the same-URL case
+        // returned above. Limits belong to the server that reported them, so the
+        // cached copy is discarded and re-read against the new one rather than
+        // sizing requests to a machine we are no longer talking to.
+        ServerLimits.reset()
         cookieJar = PersistentCookieJar.getInstance(context)
 
         // SessionStateInterceptor is added first so it sees both request and response

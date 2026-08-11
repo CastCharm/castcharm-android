@@ -8,8 +8,10 @@ package com.castcharm.android.data.repository
 
 import android.util.Log
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.provider.PodcastArtworkProvider
 import com.castcharm.android.data.api.CastCharmApi
+import com.castcharm.android.data.api.ServerLimits
 import com.castcharm.android.data.api.models.parseServerDateTime
 import com.castcharm.android.data.api.models.resolveImageUrl
 import com.castcharm.android.data.api.models.withFeedCoverToken
@@ -37,6 +39,13 @@ class FeedRepository(
             Log.d("FeedRepository", "Skipping refreshFeeds while offline")
             return
         }
+
+        // Learn what this server accepts before anything sizes a request against
+        // it. This sits here because refreshFeeds is the one call every online
+        // entry point makes — dashboard, feed list, episode list, Android Auto —
+        // so the limits are known regardless of where the user starts. It is
+        // throttled and never throws; see ServerLimits.ensureFresh.
+        ServerLimits.ensureFresh(api)
 
         val feeds = api.getFeeds()
         val baseUrl = CastCharmApp.apiClient.getBaseUrl()
@@ -102,7 +111,28 @@ class FeedRepository(
             feedDao.deleteFeedsNotIn(remoteIds)
         }
 
+        // Whether any feed's artwork actually moved, decided before the upsert
+        // overwrites the old values. A feed the app has not seen before counts:
+        // its episodes may already be cached from a previous install of the same
+        // subscription and would otherwise keep whatever art they had.
+        val artworkChanged = entities.any { incoming ->
+            val previous = existingById[incoming.id]
+            previous == null || previous.image_url != incoming.image_url
+        }
+
         feedDao.upsertAll(entities)
+
+        // Push the freshly written artwork URLs down onto episodes. This is the one
+        // moment a feed's cover can have changed, so it is the right place for a
+        // whole-table update — as opposed to inside every episode merge, where it
+        // re-scanned the episodes table on each page the list happened to fetch.
+        // Guarded so the ordinary refresh, where nothing moved, costs nothing.
+        if (artworkChanged) {
+            Log.d("FeedRepository", "Feed artwork changed — propagating to episodes")
+            AppDatabase.getDatabase(CastCharmApp.instance)
+                .episodeDao()
+                .syncFeedArtworkOntoEpisodes()
+        }
     }
 
     // Deletes a feed from the local DB. The server-side delete is expected to have

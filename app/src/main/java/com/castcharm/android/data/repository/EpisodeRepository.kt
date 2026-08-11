@@ -15,15 +15,26 @@ package com.castcharm.android.data.repository
 import android.util.Log
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.CastCharmApi
+import com.castcharm.android.data.api.models.EpisodeIndexOut
 import com.castcharm.android.data.api.models.EpisodeOut
-import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.api.models.clampProgressSeconds
+import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.api.models.parseDuration
 import com.castcharm.android.data.api.models.parseServerDateTime
 import com.castcharm.android.data.api.models.resolveImageUrl
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
 import com.castcharm.android.data.db.entities.EpisodeEntity
+import com.castcharm.android.data.api.models.BulkEpisodeRequest
+import com.castcharm.android.data.api.ServerLimits
 import kotlinx.coroutines.flow.Flow
+import retrofit2.HttpException
+
+// Ids per purely local statement. Nothing leaves the device on these paths, so
+// the only ceiling that applies is SQLite's bind-variable count — 999 on older
+// Android builds. Request sizes come from ServerLimits instead, since those have
+// to satisfy the server as well.
+private const val LOCAL_ID_CHUNK = 400
 
 class EpisodeRepository(
     private val api: CastCharmApi,
@@ -32,8 +43,52 @@ class EpisodeRepository(
     fun getEpisodesByFeed(feedId: Int): Flow<List<EpisodeEntity>> =
         episodeDao.getEpisodesByFeed(feedId)
 
+    /**
+     * Fetches the feed's episode ids in display order, or null if this server is
+     * too old to have the endpoint.
+     *
+     * Returning null rather than throwing is deliberate: the index is an
+     * optimisation, and an app updated ahead of its server should degrade to
+     * sequential loading rather than showing an empty feed.
+     */
+    suspend fun fetchEpisodeIndex(feedId: Int, filter: String = "all"): EpisodeIndexOut? {
+        if (CastCharmApp.isOfflineMode) return null
+        return try {
+            api.getEpisodeIndex(feedId, filter = filter)
+        } catch (e: HttpException) {
+            if (e.code() == 404) {
+                Log.i("EpisodeRepository", "Server has no /episode-index; using sequential loading")
+                null
+            } else {
+                throw e
+            }
+        }
+    }
+
+    /**
+     * Fetches the named episodes and merges them into the DB.
+     *
+     * Unlike [refreshEpisodesByFeed] this never prunes: a handful of episodes says
+     * nothing about the ones outside it, so deleting local rows on the strength of
+     * a page is how a windowed list would erase the rest of the feed. Pruning
+     * belongs to [pruneToIndex], which has the whole picture.
+     */
+    suspend fun fetchEpisodesByIds(feedId: Int, ids: List<Int>): List<EpisodeEntity> {
+        if (CastCharmApp.isOfflineMode || ids.isEmpty()) return emptyList()
+        val fetched = ids.chunked(ServerLimits.current.idsPerRequest).flatMap { chunk ->
+            api.getEpisodesByIds(feedId, ids = chunk.joinToString(","))
+        }
+        return mergePage(fetched)
+    }
+
     // Fetches episodes for a feed from the server and merges them into the local DB.
     // Returns true if there are more episodes beyond the requested limit (pagination).
+    //
+    // This is the pre-index path, kept for servers without /episode-index and for
+    // callers that genuinely want the newest N episodes. Note that it re-reads the
+    // window from the newest episode every time rather than appending, so growing
+    // it in steps costs the sum of every limit asked for — which is exactly why
+    // reaching deep into a feed this way was so expensive.
     //
     // The "limit+1" trick: requesting one more episode than needed lets us detect
     // hasMore without a separate count query — if we get limit+1 results, there's
@@ -49,54 +104,19 @@ class EpisodeRepository(
         }
 
         return try {
-            val episodes = api.getEpisodes(feedId, limit = limit + 1)
-            val hasMore = episodes.size > limit
-            val pageEpisodes = episodes.take(limit)
+            // The has-more probe asks for one more than it wants, so the clamp has
+            // to leave room for it: a caller passing exactly the server's maximum
+            // would otherwise request maximum+1 and get a 422 instead of a page.
+            val safeLimit = limit.coerceIn(1, ServerLimits.current.safePageSize)
+            val episodes = api.getEpisodes(feedId, limit = safeLimit + 1)
+            val hasMore = episodes.size > safeLimit
+            val pageEpisodes = episodes.take(safeLimit)
 
-            // Read the full downloads table once to avoid N+1 DB queries in the map below.
-            val db = AppDatabase.getDatabase(CastCharmApp.instance)
-            val allPhoneDownloadEpisodeIds = db.downloadDao()
-                .getAllDownloadsOnceOrdered()
-                .map { it.episode_id }
-                .toSet()
-
-            // The subset of the current page that has active phone downloads — passed
-            // to mergeFromApi() for its status/progress override logic.
-            val activePhoneDownloadEpisodeIdsOnPage = pageEpisodes
-                .map { it.id }
-                .filter { it in allPhoneDownloadEpisodeIds }
-                .toSet()
-
-            // Map each remote EpisodeOut to an EpisodeEntity, preserving local state
-            // via the toEntity() extension function.
-            val mergedEpisodes = pageEpisodes.map { remote ->
-                val existing = episodeDao.getEpisodeOnce(remote.id)
-                remote.toEntity(
-                    existing = existing,
-                    hasActivePhoneDownload = remote.id in allPhoneDownloadEpisodeIds
-                )
-            }
-
-            episodeDao.mergeFromApi(
-                episodes = mergedEpisodes,
-                activePhoneDownloadEpisodeIds = activePhoneDownloadEpisodeIdsOnPage
-            )
+            mergePage(pageEpisodes)
 
             // Pruning only happens when we have the full episode list (last page).
             if (!hasMore) {
-                val remoteIds = pageEpisodes.map { it.id }
-                // Determine which local episodes have active phone downloads so they
-                // can be excluded from the prune operation.
-                val preserveIds = episodeDao.getEpisodesByFeedOnce(feedId)
-                    .map { it.id }
-                    .filter { it in allPhoneDownloadEpisodeIds }
-                    .toSet()
-
-                episodeDao.pruneMissingEpisodesForFeed(
-                    feedId = feedId,
-                    remoteIds = remoteIds,
-                    preserveIds = preserveIds
-                )
+                pruneToIndex(feedId, pageEpisodes.map { it.id })
             }
 
             hasMore
@@ -104,6 +124,97 @@ class EpisodeRepository(
             Log.e("EpisodeRepository", "Error refreshing episodes for feed $feedId", e)
             throw e
         }
+    }
+
+    /**
+     * Deletes local rows for this feed that the server no longer lists.
+     *
+     * [remoteIds] must be the feed's COMPLETE id list — from /episode-index or from
+     * a known-final page. Episodes with an active phone download are preserved so
+     * the DownloadWorker does not lose the row out from under a file it is writing.
+     */
+    suspend fun pruneToIndex(feedId: Int, remoteIds: List<Int>) {
+        val db = AppDatabase.getDatabase(CastCharmApp.instance)
+        val activeDownloadIds = db.downloadDao()
+            .getAllDownloadsOnceOrdered()
+            .map { it.episode_id }
+            .toSet()
+
+        // The difference is computed here rather than as a SQL "NOT IN (:remoteIds)".
+        // A full feed index is thousands of ids, and SQLite binds one variable per
+        // id — over the 999-variable ceiling on older Android builds. A NOT IN also
+        // cannot be chunked, since each chunk would delete the other chunks' rows.
+        val remote = remoteIds.toHashSet()
+        val doomed = episodeDao.getEpisodeIdsByFeed(feedId)
+            .filter { it !in remote && it !in activeDownloadIds }
+
+        if (doomed.isEmpty()) return
+        Log.d("EpisodeRepository", "Pruning ${doomed.size} stale episode(s) from feed $feedId")
+        doomed.chunked(LOCAL_ID_CHUNK).forEach { episodeDao.deleteEpisodesByIds(it) }
+    }
+
+    /**
+     * Sets played state on many episodes at once.
+     *
+     * Uses the server's bulk endpoint, which SETS the state rather than toggling,
+     * so it is correct for a selection whose current state the app has not loaded
+     * — which is now the normal case, since "Select all" covers the whole feed
+     * while only the visible window is in memory.
+     */
+    suspend fun bulkSetPlayed(episodeIds: List<Int>, played: Boolean) {
+        if (episodeIds.isEmpty()) return
+        val action = if (played) "mark_played" else "mark_unplayed"
+        val now = System.currentTimeMillis()
+
+        if (CastCharmApp.isOfflineMode) {
+            // Local only — no request is made, so only SQLite's limit applies.
+            episodeIds.chunked(LOCAL_ID_CHUNK).forEach {
+                episodeDao.updatePlayedStatusForIds(it, played, now, pending = true)
+            }
+            return
+        }
+
+        episodeIds.chunked(ServerLimits.current.bulkIdsPerRequest).forEach { chunk ->
+            api.bulkEpisodeAction(BulkEpisodeRequest(episode_ids = chunk, action = action))
+            episodeDao.updatePlayedStatusForIds(chunk, played, now, pending = false)
+        }
+    }
+
+    /**
+     * Merges a batch of server episodes into the DB, returning them as entities in
+     * the order the server gave them.
+     *
+     * The existing-row lookup is one batched query. It used to be a
+     * getEpisodeOnce() per episode inside a map — a full round trip through Room
+     * for every record in the page, on top of the identical batch lookup
+     * mergeFromApi() does immediately afterwards anyway.
+     */
+    private suspend fun mergePage(page: List<EpisodeOut>): List<EpisodeEntity> {
+        if (page.isEmpty()) return emptyList()
+
+        val db = AppDatabase.getDatabase(CastCharmApp.instance)
+        val allPhoneDownloadEpisodeIds = db.downloadDao()
+            .getAllDownloadsOnceOrdered()
+            .map { it.episode_id }
+            .toSet()
+
+        val existingById = episodeDao.getEpisodesByIds(page.map { it.id }).associateBy { it.id }
+
+        val merged = page.map { remote ->
+            remote.toEntity(
+                existing = existingById[remote.id],
+                hasActivePhoneDownload = remote.id in allPhoneDownloadEpisodeIds
+            )
+        }
+
+        episodeDao.mergeFromApi(
+            episodes = merged,
+            activePhoneDownloadEpisodeIds = page.map { it.id }
+                .filter { it in allPhoneDownloadEpisodeIds }
+                .toSet()
+        )
+
+        return merged
     }
 
     fun getUnplayedEpisodes(feedId: Int): Flow<List<EpisodeEntity>> =
@@ -161,6 +272,11 @@ class EpisodeRepository(
         durationSeconds: Int? = null,
         playedThresholdPct: Float = 0.98f
     ) {
+        // Clamped once at the top so every write below — local and remote — uses
+        // the same value. Shadowed rather than renamed: the parameter name is part
+        // of this function's signature and callers pass it by name.
+        @Suppress("NAME_SHADOWING")
+        val position = clampProgressSeconds(position)
         val now = System.currentTimeMillis()
         val existing = episodeDao.getEpisodeOnce(episodeId) ?: run {
             // Episode not yet cached — write progress with pending flag so SyncWorker
@@ -199,7 +315,7 @@ class EpisodeRepository(
 
         // Online path: sync to server first, then update DB.
         try {
-            api.updateProgress(episodeId, ProgressRequest(position))
+            api.updateProgress(episodeId, progressRequest(position))
             episodeDao.updateProgress(episodeId, position, now, pending = false)
 
             if (existing.played != targetPlayed) {

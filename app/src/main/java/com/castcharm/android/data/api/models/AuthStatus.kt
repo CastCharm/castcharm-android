@@ -48,9 +48,43 @@ data class ApiKeyRenameRequest(
 
 // POST /api/episodes/{id}/progress body. Sent every 10 seconds while playing
 // and on pause/stop. position_seconds is the current player position.
+//
+// Build these with [progressRequest], not directly — see below.
 data class ProgressRequest(
     val position_seconds: Int
 )
+
+// Range the server accepts (ProgressBody in app/schemas.py). The upper bound is
+// roughly 11.5 days, well past any real episode.
+private const val MIN_PROGRESS_SECONDS = 0
+private const val MAX_PROGRESS_SECONDS = 1_000_000
+
+/**
+ * A playback position, forced into the range the server accepts.
+ *
+ * Clamp at the point the value is produced, not just before it is sent. The
+ * player's reported position is not guaranteed non-negative — PlayerController
+ * already guards its own read with coerceAtLeast(0) — and dividing a Long
+ * milliseconds value before narrowing to Int can wrap. Clamping only the request
+ * leaves the unclamped number to be written to the database, where the local row
+ * and the server then disagree and nothing ever heals the local copy: SyncWorker
+ * would send 0 forever while the row stayed negative.
+ *
+ * Takes Long so the clamp happens before the narrowing that could wrap.
+ */
+fun clampProgressSeconds(seconds: Long): Int =
+    seconds.coerceIn(MIN_PROGRESS_SECONDS.toLong(), MAX_PROGRESS_SECONDS.toLong()).toInt()
+
+fun clampProgressSeconds(seconds: Int): Int = clampProgressSeconds(seconds.toLong())
+
+/**
+ * A progress update for the server. The value is clamped here too, so a caller
+ * that skipped [clampProgressSeconds] still cannot send something that would be
+ * rejected outright — a 422 does not merely drop one reading, it fails the sync
+ * carrying it and keeps failing on every retry.
+ */
+fun progressRequest(positionSeconds: Int): ProgressRequest =
+    ProgressRequest(clampProgressSeconds(positionSeconds))
 
 // POST /api/feeds body. url is the only required field; the server resolves
 // redirects and detects RSS from podcast page URLs automatically.

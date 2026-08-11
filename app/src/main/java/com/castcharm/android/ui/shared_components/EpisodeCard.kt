@@ -629,8 +629,16 @@ fun EpisodeCard(
     }
 }
 
+/**
+ * Stand-in for an episode card whose content is not loaded yet.
+ *
+ * [showSpinner] is on when the whole screen is waiting for its first data. It is
+ * off for the placeholder rows inside a loaded list: a long feed puts a row here
+ * for every episode it has not fetched, and a fling past a few hundred of them
+ * with a spinner in each is a strobe rather than a hint that anything is coming.
+ */
 @Composable
-fun EpisodeCardSkeleton() {
+fun EpisodeCardSkeleton(showSpinner: Boolean = true) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -646,12 +654,14 @@ fun EpisodeCardSkeleton() {
                     .clip(RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .size(18.dp)
-                        .semantics { contentDescription = "Loading" },
-                    strokeWidth = 2.dp
-                )
+                if (showSpinner) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .semantics { contentDescription = "Loading" },
+                        strokeWidth = 2.dp
+                    )
+                }
             }
 
             Spacer(Modifier.size(12.dp))

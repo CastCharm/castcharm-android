@@ -20,7 +20,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.castcharm.android.CastCharmApp
-import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.api.models.clampProgressSeconds
+import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
 import com.castcharm.android.notifications.NewEpisodesNotifier
@@ -109,13 +110,15 @@ class SyncWorker(
                 }
 
                 if (episode.sync_pending_progress) {
-                    api.updateProgress(
-                        episode.id,
-                        ProgressRequest(episode.play_position_seconds)
-                    )
+                    // Clamped once and used for both, so a row written before this
+                    // existed is healed rather than replayed: sending the clamped
+                    // value while writing back the original would leave the local
+                    // copy permanently disagreeing with the server.
+                    val position = clampProgressSeconds(episode.play_position_seconds)
+                    api.updateProgress(episode.id, progressRequest(position))
                     dao.updateProgress(
                         episode.id,
-                        episode.play_position_seconds,
+                        position,
                         episode.last_played_at ?: System.currentTimeMillis(),
                         pending = false
                     )

@@ -23,6 +23,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.ServerLimits
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.entities.DownloadEntity
 import com.castcharm.android.data.db.entities.EpisodeEntity
@@ -572,16 +573,16 @@ class DownloadsViewModel : ViewModel() {
             .toSet()
 
         val queuedResult = runCatching {
-            api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "queued", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadingResult = runCatching {
-            api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloading", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadedResult = runCatching {
-            api.getAllEpisodes(status = "downloaded", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloaded", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val failedResult = runCatching {
-            api.getAllEpisodes(status = "failed", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "failed", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
 
         // If every API call failed (server unreachable), bail before touching the DB.
@@ -653,10 +654,10 @@ class DownloadsViewModel : ViewModel() {
             .toSet()
 
         val queuedResult = runCatching {
-            api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "queued", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadingResult = runCatching {
-            api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloading", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
 
         // If both calls failed (server unreachable), bail — running the stale cleanup

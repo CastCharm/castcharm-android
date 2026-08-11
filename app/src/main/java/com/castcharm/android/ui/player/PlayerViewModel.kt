@@ -61,12 +61,25 @@ class PlayerViewModel : ViewModel() {
     private var currentlyLoadedEpisodeId: Int? = null
 
     init {
+        // The played-threshold is read once per process, not once per open.
+        //
+        // This ViewModel is scoped to the "player" navigation entry, so it is
+        // rebuilt every single time the player is opened — and this was a fresh
+        // HTTP round trip each time, to fetch the whole settings object for one
+        // number that changes about never. Held in a companion below so the second
+        // and subsequent opens cost nothing.
+        cachedThresholdPct?.let { autoPlayedThresholdPct = it }
         viewModelScope.launch {
-            if (!CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized) {
+            if (cachedThresholdPct == null &&
+                !CastCharmApp.isOfflineMode &&
+                CastCharmApp.apiClient.isInitialized
+            ) {
                 runCatching {
                     CastCharmApp.apiClient.getApi().getSettings()
                 }.onSuccess {
-                    autoPlayedThresholdPct = it.auto_played_threshold / 100f
+                    val pct = it.auto_played_threshold / 100f
+                    cachedThresholdPct = pct
+                    autoPlayedThresholdPct = pct
                 }
             }
         }
@@ -523,5 +536,18 @@ class PlayerViewModel : ViewModel() {
         sleepTimerJob?.cancel()
         loadEpisodeJob?.cancel()
         super.onCleared()
+    }
+
+    companion object {
+        /**
+         * Auto-played threshold, remembered for the life of the process.
+         *
+         * Survives this ViewModel because the ViewModel does not: it belongs to the
+         * player navigation entry and is discarded every time the player closes.
+         * A setting that changes once in a blue moon should not cost a request on
+         * every open.
+         */
+        @Volatile
+        private var cachedThresholdPct: Float? = null
     }
 }

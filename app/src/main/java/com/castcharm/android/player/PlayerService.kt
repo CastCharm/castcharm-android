@@ -67,7 +67,8 @@ import com.castcharm.android.MainActivity
 import com.castcharm.android.R
 import com.castcharm.android.SKIP_SILENCE_KEY
 import com.castcharm.android.data.api.ApiKeyInterceptor
-import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.api.models.clampProgressSeconds
+import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.repository.FeedRepository
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
@@ -738,7 +739,10 @@ class PlayerService : MediaLibraryService() {
                 }
                 episodeId ?: continue
 
-                val positionSeconds = (positionMs / 1000L).toInt()
+                // Clamped here, before it reaches either the database or the
+                // server, so the local row and the server can never disagree about
+                // a reading the player got wrong.
+                val positionSeconds = clampProgressSeconds(positionMs / 1000L)
                 val durationSeconds = durationMs.takeIf { it > 0L }?.div(1000L)?.toInt()
                 val now = System.currentTimeMillis()
 
@@ -766,7 +770,7 @@ class PlayerService : MediaLibraryService() {
 
                         if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
                             CastCharmApp.apiClient.getApi()
-                                .updateProgress(episodeId, ProgressRequest(positionSeconds))
+                                .updateProgress(episodeId, progressRequest(positionSeconds))
                         }
 
                         // Auto-mark played if the threshold was crossed mid-playback.

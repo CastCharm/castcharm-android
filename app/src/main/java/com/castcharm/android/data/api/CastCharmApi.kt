@@ -78,6 +78,35 @@ interface CastCharmApi {
         @Query("order") order: String = "desc"
     ): List<EpisodeOut>
 
+    // Fetches a specific set of episodes, comma-separated, max 500 per call.
+    // This is how the windowed list fills itself in: it knows exactly which rows
+    // are on screen and asks for those, rather than an offset that only lines up
+    // if its idea of the feed's ordering matches the server's.
+    @GET("api/feeds/{feed_id}/episodes")
+    suspend fun getEpisodesByIds(
+        @Path("feed_id") feedId: Int,
+        @Query("ids") ids: String,
+        @Query("include_hidden") includeHidden: Boolean = false
+    ): List<EpisodeOut>
+
+    // The feed's episode ids in display order — see EpisodeIndexOut. Offsets
+    // into this list address getEpisodes() pages exactly, because the server
+    // builds both from the same filter and ORDER BY.
+    //
+    // filter is "all", "unplayed" or "in_progress". There is deliberately no
+    // "downloaded": that means "on this phone", which only the local DB knows.
+    //
+    // Added after the Android app shipped, so a server that predates it answers
+    // 404 — EpisodeRepository treats that as "no index available" and the list
+    // falls back to sequential loading rather than failing.
+    @GET("api/feeds/{feed_id}/episode-index")
+    suspend fun getEpisodeIndex(
+        @Path("feed_id") feedId: Int,
+        @Query("filter") filter: String = "all",
+        @Query("include_hidden") includeHidden: Boolean = false,
+        @Query("order") order: String = "desc"
+    ): EpisodeIndexOut
+
     // Returns raw JPEG bytes for the feed's cover artwork.
     @GET("api/feeds/{feed_id}/cover.jpg")
     suspend fun getFeedCoverImage(@Path("feed_id") feedId: Int): ResponseBody
@@ -121,6 +150,11 @@ interface CastCharmApi {
 
     @GET("api/episodes/{episode_id}")
     suspend fun getEpisode(@Path("episode_id") episodeId: Int): EpisodeOut
+
+    // One action, many episodes, one request. Used by multi-select so marking a
+    // whole feed played is a handful of calls rather than one per episode.
+    @POST("api/episodes/bulk")
+    suspend fun bulkEpisodeAction(@Body body: BulkEpisodeRequest): BulkEpisodeResult
 
     // @Streaming prevents Retrofit from buffering the entire response body in
     // memory before returning — essential for large audio files. DownloadWorker
@@ -178,6 +212,12 @@ interface CastCharmApi {
     // Basic server health info (version, storage usage).
     @GET("api/status")
     suspend fun getStatus(): AppStatus
+
+    // The request ceilings this server enforces. Read through ServerLimits, which
+    // caches the answer and falls back to conservative defaults for a server too
+    // old to have the endpoint.
+    @GET("api/limits")
+    suspend fun getLimits(): LimitsOut
 
     // Global server configuration including download path, naming rules, and
     // the played-detection threshold. Used to drive filename and progress logic.

@@ -14,6 +14,14 @@ package com.castcharm.android
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -624,6 +632,27 @@ private fun OnReturnedOnline(isOfflineMode: Boolean, onOnline: () -> Unit) {
 // is fully logged in. Each screen's data load is triggered from exactly one place,
 // OnScreenResumed, rather than from both the ViewModel's init and a lifecycle
 // observer — see the note on that function.
+// Duration of the fade between navigation destinations.
+//
+// navigation-compose defaults to 700 ms, which felt like waiting. Dropping it to
+// 160 ms felt worse — not quick, but abrupt: a fade that short is about ten
+// frames, so any hitch while the incoming screen composes eats a visible fraction
+// of it and the whole thing reads as a stutter. 500 ms is long enough that the
+// motion carries through a dropped frame or two, which is what "smooth" actually
+// depends on here, and it costs nothing on slower hardware because a crossfade is
+// just alpha.
+private const val NAV_TRANSITION_MS = 500
+
+// The player's slide. Kept on tween's default FastOutSlowIn easing, which is what
+// that curve is actually for — it gives the sheet a sense of weight, starting and
+// settling rather than moving at a constant rate. Slightly quicker than the fade
+// because travel reads as slower than a crossfade of the same duration.
+private const val PLAYER_TRANSITION_MS = 380
+
+/** True when this back-stack entry is the full-screen player. */
+private val androidx.navigation.NavBackStackEntry.isPlayerRoute: Boolean
+    get() = destination.route == "player"
+
 @Composable
 fun MainScaffold(
     navController: androidx.navigation.NavHostController,
@@ -703,7 +732,53 @@ fun MainScaffold(
                 NavHost(
                     navController = navController,
                     startDestination = "dashboard",
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    // navigation-compose defaults to a 700 ms crossfade on every
+                    // destination change. That is most of a second before a screen
+                    // settles — it reads as the app thinking rather than as motion,
+                    // and it applies to every tab switch, every feed opened, and
+                    // opening and closing the player. A short fade keeps the sense
+                    // of a transition without making the user wait for it.
+                    // Two kinds of motion, chosen per destination.
+                    //
+                    // The player behaves like a sheet drawn up over the app, so it
+                    // moves through space — and the screen underneath deliberately
+                    // does nothing, because something sliding over a surface that
+                    // is simultaneously fading reads as two unrelated animations.
+                    //
+                    // Everything else crossfades. Those are lateral moves between
+                    // peers, where there is no "direction" to travel in, and alpha
+                    // uses LinearEasing: tween() defaults to FastOutSlowIn, which
+                    // is right for movement but makes a fade appear to stall at
+                    // each end and rush the middle.
+                    enterTransition = {
+                        if (targetState.isPlayerRoute) {
+                            slideInVertically(
+                                initialOffsetY = { it },
+                                animationSpec = tween(PLAYER_TRANSITION_MS),
+                            )
+                        } else {
+                            fadeIn(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                        }
+                    },
+                    exitTransition = {
+                        if (targetState.isPlayerRoute) ExitTransition.None
+                        else fadeOut(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                    },
+                    popEnterTransition = {
+                        if (initialState.isPlayerRoute) EnterTransition.None
+                        else fadeIn(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                    },
+                    popExitTransition = {
+                        if (initialState.isPlayerRoute) {
+                            slideOutVertically(
+                                targetOffsetY = { it },
+                                animationSpec = tween(PLAYER_TRANSITION_MS),
+                            )
+                        } else {
+                            fadeOut(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                        }
+                    },
                 ) {
                     // ---- Dashboard route -------------------------------------
                     // The ViewModel collects cached data from the DB in its init;

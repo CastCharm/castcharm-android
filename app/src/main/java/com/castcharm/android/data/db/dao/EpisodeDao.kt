@@ -71,6 +71,60 @@ interface EpisodeDao {
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId ORDER BY published_at DESC")
     fun getEpisodesByFeed(feedId: Int): Flow<List<EpisodeEntity>>
 
+    // Ids only, in the same order the server's /episode-index uses. This is the
+    // offline / old-server stand-in for that endpoint: it can only see episodes
+    // already cached, but it gives the list something to lay out rows from.
+    //
+    // The id tiebreaker matters. Podcasts routinely publish several episodes with
+    // an identical timestamp, and without it SQLite is free to order those ties
+    // differently from one query to the next — which, once offsets are computed
+    // against this ordering, means pages that quietly skip and repeat rows.
+    @Query("SELECT id FROM episodes WHERE feed_id = :feedId ORDER BY published_at DESC, id DESC")
+    suspend fun getEpisodeIdsByFeed(feedId: Int): List<Int>
+
+    // Live view of just the episodes the list is currently showing. Observing the
+    // whole feed instead means every write to the episodes table reloads every row
+    // of a 2,000-episode podcast, descriptions and all, to redraw a screen holding
+    // about twenty of them.
+    @Query("SELECT * FROM episodes WHERE id IN (:ids)")
+    fun getEpisodesByIdsFlow(ids: List<Int>): Flow<List<EpisodeEntity>>
+
+    // The "Downloaded" filter's ordering. Unlike the other filters this one cannot
+    // come from the server — "downloaded" means the file is on THIS phone — so it
+    // is answered locally, and as a Flow so deleting a download drops its row from
+    // the list straight away instead of leaving a stale entry behind.
+    @Query("""
+        SELECT id FROM episodes
+        WHERE feed_id = :feedId AND local_path IS NOT NULL
+        ORDER BY published_at DESC, id DESC
+    """)
+    fun getDownloadedEpisodeIdsByFeedFlow(feedId: Int): Flow<List<Int>>
+
+    @Query("""
+        SELECT id FROM episodes
+        WHERE feed_id = :feedId AND local_path IS NOT NULL
+        ORDER BY published_at DESC, id DESC
+    """)
+    suspend fun getDownloadedEpisodeIdsByFeed(feedId: Int): List<Int>
+
+    // Local equivalents of the server's /episode-index filters, for when there is
+    // no server to ask: offline, or a build too old to have the endpoint. Without
+    // these the filter chips fall back to the unfiltered ordering, which shows the
+    // wrong episodes under a chip that says otherwise.
+    @Query("""
+        SELECT id FROM episodes
+        WHERE feed_id = :feedId AND hidden = 0 AND played = 0
+        ORDER BY published_at DESC, id DESC
+    """)
+    suspend fun getUnplayedEpisodeIdsByFeed(feedId: Int): List<Int>
+
+    @Query("""
+        SELECT id FROM episodes
+        WHERE feed_id = :feedId AND hidden = 0 AND played = 0 AND play_position_seconds > 0
+        ORDER BY published_at DESC, id DESC
+    """)
+    suspend fun getInProgressEpisodeIdsByFeed(feedId: Int): List<Int>
+
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId ORDER BY published_at DESC LIMIT :limit OFFSET :offset")
     suspend fun getEpisodesByFeedPaginated(
         feedId: Int,
@@ -114,10 +168,44 @@ interface EpisodeDao {
     """)
     suspend fun updatePlayedStatus(episodeId: Int, played: Boolean, timestamp: Long, pending: Boolean = false)
 
+    // Batch form of updatePlayedStatus. Callers must chunk: SQLite binds one
+    // variable per id and older Android builds cap that at 999.
+    @Query("""
+        UPDATE episodes SET
+            played = :played,
+            last_played_at = :timestamp,
+            play_position_seconds = CASE WHEN :played = 1 THEN COALESCE(duration, play_position_seconds) ELSE 0 END,
+            sync_pending_played = :pending
+        WHERE id IN (:ids)
+    """)
+    suspend fun updatePlayedStatusForIds(
+        ids: List<Int>,
+        played: Boolean,
+        timestamp: Long,
+        pending: Boolean = false
+    )
+
+    @Query("DELETE FROM episodes WHERE id IN (:ids)")
+    suspend fun deleteEpisodesByIds(ids: List<Int>)
+
     @Query("UPDATE episodes SET hidden = :hidden WHERE id = :episodeId")
     suspend fun updateHidden(episodeId: Int, hidden: Boolean)
 
-    @Query("UPDATE episodes SET play_position_seconds = :position, last_played_at = :timestamp, sync_pending_progress = :pending WHERE id = :episodeId")
+    // Clamped in SQL rather than trusting callers. A playback position is
+    // non-negative by definition, and the player's reported position is not
+    // guaranteed to be — PlayerViewModel alone writes here from five branches, and
+    // a value that lands in the row outlives the moment: SyncWorker replays it,
+    // and the server now rejects out-of-range positions outright, so one bad
+    // reading would fail that episode's sync on every future attempt.
+    //
+    // The upper bound matches ProgressBody in app/schemas.py (~11.5 days).
+    @Query("""
+        UPDATE episodes SET
+            play_position_seconds = MIN(1000000, MAX(0, :position)),
+            last_played_at = :timestamp,
+            sync_pending_progress = :pending
+        WHERE id = :episodeId
+    """)
     suspend fun updateProgress(episodeId: Int, position: Int, timestamp: Long, pending: Boolean = false)
 
     @Query("SELECT * FROM episodes WHERE local_path IS NOT NULL ORDER BY published_at DESC")
@@ -292,12 +380,32 @@ interface EpisodeDao {
             )
         }
 
+        // Take artwork from the local feed row rather than from the server's copy.
+        //
+        // The server sends its own resolved URL, but FeedRepository stores a
+        // cache-busting token on the feed's URL — without which a recycled feed id
+        // serves the previous podcast's cover out of the image cache. Applying it
+        // at write time means episodes are correct as they arrive, rather than
+        // being written wrong and corrected by a later pass: a page fetched after
+        // the feed refresh has already happened would never have been revisited.
+        //
+        // Only the handful of distinct feeds in this batch are looked up.
+        val artByFeed = merged
+            .map { it.feed_id }
+            .distinct()
+            .associateWith { feedArtworkUrl(it) }
+
+        val withArtwork = merged.map { ep ->
+            artByFeed[ep.feed_id]?.let { ep.copy(feed_image_url = it) } ?: ep
+        }
+
         // insertAll handles the insert/update routing based on whether each row
         // already exists in the DB.
-        insertAll(merged)
-
-        syncFeedArtworkOntoEpisodes()
+        insertAll(withArtwork)
     }
+
+    @Query("SELECT image_url FROM feeds WHERE id = :feedId")
+    suspend fun feedArtworkUrl(feedId: Int): String?
 
     /**
      * Copies each feed's current artwork URL down onto its episodes.
@@ -312,7 +420,17 @@ interface EpisodeDao {
      *
      * Taking the value from the feeds table instead means episodes inherit the
      * tokenised URL FeedRepository already stores, and every screen is fixed at once.
-     * Re-run on each merge so a changed cover propagates rather than sticking.
+     *
+     * This handles episodes ALREADY stored when a feed's cover changes. Episodes
+     * arriving from the server take their artwork at write time in mergeFromApi,
+     * so the two together cover both directions and neither has to run often.
+     *
+     * Called by FeedRepository.refreshFeeds, straight after the feeds table is
+     * written and only when an artwork URL actually moved — the only moment this
+     * can have anything to do. It used to run inside mergeFromApi, which was
+     * reasonable when a feed loaded in one request but became a whole-table UPDATE
+     * per fetch once the episode list started paging: a scan of every episode row,
+     * dozens of times, to propagate artwork that had not changed.
      */
     @Query(
         """
