@@ -110,6 +110,23 @@ const val SCROLL_TO_TOP_AFTER_ROWS = 8
 // grow with how deep into the feed the user was.
 const val SCROLL_TO_TOP_RUNWAY = 12
 
+// Arriving from a deep link, the list holds still at the top for this long before
+// travelling down to the episode. Long enough for the header art and the first
+// rows to paint, so the trip starts from a page that looks finished rather than
+// from a screen of skeletons.
+const val JUMP_DWELL_MS = 500L
+
+// Longest the jump will wait for the feed header before travelling without it.
+// The header is normally a local cache read, so this is only reached on a feed
+// being opened for the first time over a bad connection — where standing still
+// indefinitely would be worse than arriving at a headerless list.
+const val JUMP_HEADER_WAIT_MS = 3_000L
+
+// How long that trip takes. Fixed, not proportional to distance: the list covers
+// everything above the last screenful instantly, so an episode 2,000 back arrives
+// in the same time as one 20 back.
+const val JUMP_TRAVEL_MS = 700
+
 // Most episodes the hydrated window may span. A whole page-aligned multiple, well
 // under SQLite's 999-variable ceiling for the IN () clause it becomes.
 const val MAX_WINDOW_IDS = PAGE_SIZE * 8

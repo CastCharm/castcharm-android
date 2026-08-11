@@ -17,9 +17,12 @@ package com.castcharm.android.ui.episodes
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +84,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -115,6 +119,16 @@ import com.castcharm.android.ui.shared_components.PlaceholderArtwork
 import com.castcharm.android.ui.shared_components.ReconnectIconButton
 import com.castcharm.android.ui.shared_components.stripHtml
 
+/**
+ * The items the episode list draws above the first episode.
+ *
+ * An enum rather than a count so that "what is drawn" and "how many rows the
+ * episodes are offset by" cannot be stated separately and disagree. Everything
+ * that turns an episode's position into a list index reads the size of the list
+ * of these that the screen built.
+ */
+private enum class EpisodeListHeader { Feed, Filters, EmptyState }
+
 @Composable
 fun EpisodeListScreen(
     feedId: Int,
@@ -142,10 +156,25 @@ fun EpisodeListScreen(
     var addToPlaylistSheetEpisodeId by remember { mutableStateOf<Int?>(null) }
     val isSelectionMode = uiState.selectionMode
 
-    // Items the LazyColumn draws before the first episode: the feed header, and
-    // the filter chips when not in multi-select. Episode N lives at list index
-    // N + this, which both the jump and the window tracking need to agree on.
-    val headerItemCount = (if (feed != null) 1 else 0) + (if (!isSelectionMode) 1 else 0)
+    // Which leading items the list is drawing right now. Episode N lives at list
+    // index N + listHeaders.size, and the deep-link jump, the arrival correction
+    // and the hydration window all depend on that being exact — a leading item
+    // counted but not drawn, or drawn but not counted, puts every one of them a
+    // row out.
+    //
+    // So this list is the single statement of what comes first: the LazyColumn
+    // below draws it, and the offset is its size. Neither can drift from the
+    // other, and a new leading item is added here once.
+    val listHeaders = buildList {
+        if (feed != null) add(EpisodeListHeader.Feed)
+        if (!isSelectionMode) add(EpisodeListHeader.Filters)
+        // An empty feed with no filter applied is a whole different screen rather
+        // than a row in this one, so it is not one of these.
+        if (uiState.orderedIds.isEmpty() && uiState.filter != EpisodeFilter.ALL) {
+            add(EpisodeListHeader.EmptyState)
+        }
+    }
+    val headerItemCount = listHeaders.size
     // The jump effect below outlives changes to this count — the feed header
     // appears as soon as the cached feed row loads, which can land after the
     // effect has started — so it reads the current value rather than whatever was
@@ -175,6 +204,14 @@ fun EpisodeListScreen(
     // too. Keyed on the id so arriving from a NEW deep link re-arms it.
     var hasJumpedToHighlight by rememberSaveable(highlightEpisodeId) { mutableStateOf(false) }
 
+    // Set while one of the two automatic scrolls is running. The hydrated window
+    // follows whatever is on screen, so without this a travelling scroll would drag
+    // it across every position on the way and fetch a page for each — hundreds of
+    // requests for episodes the user is passing, not reading. The window is moved
+    // once, on arrival, instead.
+    var autoScrolling by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
     LaunchedEffect(highlightEpisodeId) {
         if (highlightEpisodeId == null || hasJumpedToHighlight) return@LaunchedEffect
         // Two different failures, told apart rather than collapsed into one
@@ -201,16 +238,106 @@ fun EpisodeListScreen(
         // the next frame rather than however long the network takes.
         snapshotFlow { listState.layoutInfo.totalItemsCount }
             .first { it > idx + currentHeaderCount }
-        listState.scrollToItem(idx + currentHeaderCount)
-    }
 
-    // Set while the jump-to-top animation is running. The window follows whatever
-    // is on screen, so without this an animated scroll from episode 1,500 would
-    // drag it across every position on the way up and fetch a page for each —
-    // hundreds of requests for episodes the user is travelling past, not reading.
-    // The window is moved once, on arrival, instead.
-    var scrollingToTop by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+        // Wait for the feed header before holding, rather than holding for a fixed
+        // beat and hoping it arrived. Of everything drawn above the episodes it is
+        // the only part that arrives asynchronously — usually from the local cache
+        // within a frame or two, but a feed opened for the first time has to be
+        // fetched, and a blind timer would start the trip over a headerless list.
+        //
+        // Cosmetic and correct at once. The trip should begin from a page that
+        // looks finished; and the destination index is worked out from the leading
+        // item count below, which this is what settles.
+        //
+        // Capped, because a feed that never loads must not strand the jump.
+        withTimeoutOrNull(JUMP_HEADER_WAIT_MS) {
+            viewModel.uiState.first { it.feed != null }
+        }
+
+        // Then hold a beat so the header and the first rows have painted, and
+        // travel down — rather than opening on a stretch of the feed with no sense
+        // of how it was reached.
+        val startedAt = listState.firstVisibleItemIndex
+        delay(JUMP_DWELL_MS)
+        // The dwell is a window for the user to take over. If they have started
+        // scrolling themselves, they have said where they want to be; hauling them
+        // somewhere else now would be the screen fighting them.
+        if (listState.firstVisibleItemIndex != startedAt || listState.isScrollInProgress) {
+            return@LaunchedEffect
+        }
+
+        // Read only now that the header has settled, so it counts what is actually
+        // on screen at the moment of the scroll.
+        val target = idx + currentHeaderCount
+
+        autoScrolling = true
+        try {
+            // Give the destination a head start: its page is fetched now so the row
+            // has a chance to be real by the time it arrives, instead of being a
+            // skeleton that fills in after the list has stopped.
+            viewModel.onVisibleRangeChanged(idx, idx)
+
+            // Only the last screenful is animated. Travelling the whole way would
+            // make Compose measure every row in between — the stutter that the
+            // jump-to-top button had — and would take longer the further back the
+            // episode was. Covering the rest instantly keeps the trip identical
+            // whatever the distance, and the eye cannot follow rows moving that
+            // fast anyway.
+            val rowsOnScreen = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(2)
+            val approachFrom = (target - rowsOnScreen + 1).coerceAtLeast(0)
+            if (approachFrom > listState.firstVisibleItemIndex) {
+                listState.scrollToItem(approachFrom)
+            }
+
+            // Measured rather than assumed: rows differ in height, and the target
+            // is the one that is expanded. Its own offset is the exact distance to
+            // put it at the top of the viewport, so the animation lands on it
+            // instead of near it.
+            val distancePx = withTimeoutOrNull(1_000) {
+                snapshotFlow {
+                    listState.layoutInfo.visibleItemsInfo
+                        .firstOrNull { it.index == target }
+                        ?.offset
+                }.first { it != null }
+            }
+            if (distancePx != null && distancePx > 0) {
+                listState.animateScrollBy(
+                    distancePx.toFloat(),
+                    tween(JUMP_TRAVEL_MS, easing = FastOutSlowInEasing)
+                )
+            } else {
+                // Rows taller than expected, so the target never came into view to
+                // be measured. Still a scroll, just one whose duration Compose
+                // picks.
+                listState.animateScrollToItem(target)
+            }
+
+            // Self-correct. The distance was measured before the trip, at the same
+            // moment the destination's page was requested — so the rows being
+            // travelled across can swap skeleton for real content on the way and
+            // change height, moving the target while the animation heads for where
+            // it used to be.
+            //
+            // Not needed for the header arriving late, despite the shift that
+            // causes: the episodes are keyed, so the list re-anchors the first
+            // visible item by key and the viewport stays on the same episode.
+            //
+            // Only reached when the animation ran to completion: if the user
+            // grabbed the list, their drag cancels this coroutine and nothing snaps
+            // out from under them.
+            val settled = idx + currentHeaderCount
+            if (listState.firstVisibleItemIndex != settled) {
+                listState.scrollToItem(settled)
+            }
+        } finally {
+            // In a finally so an interrupted trip — the user grabbing the list, or
+            // leaving the screen — cannot leave hydration switched off for the rest
+            // of this screen's life.
+            autoScrolling = false
+            val landed = listState.firstVisibleItemIndex - currentHeaderCount
+            viewModel.onVisibleRangeChanged(landed.coerceAtLeast(0), landed.coerceAtLeast(0))
+        }
+    }
 
     // Keep the loaded window following the user. Distinct from what is drawn: the
     // list always draws every episode in the feed, this decides which ones are
@@ -223,7 +350,7 @@ fun EpisodeListScreen(
         }
             .distinctUntilChanged()
             .collect { range ->
-                if (range.isEmpty() || scrollingToTop) return@collect
+                if (range.isEmpty() || autoScrolling) return@collect
                 viewModel.onVisibleRangeChanged(
                     (range.first - headerItemCount).coerceAtLeast(0),
                     (range.last - headerItemCount).coerceAtLeast(0)
@@ -523,39 +650,43 @@ fun EpisodeListScreen(
                         bottom = 4.dp
                     )
                 ) {
-                    if (feed != null) {
-                        item {
-                            FeedHeader(
-                                feedTitle = feed.title,
-                                feedDescription = feed.description,
-                                imageUrl = feed.custom_image_url ?: feed.image_url
-                                ?: feedCoverUrl(baseUrl, feed.id, feed.url),
-                                episodeCount = feed.episode_count,
-                                unplayedCount = feed.unplayed_count,
-                                onPlayFeed = if (!isOfflineMode && feed.unplayed_count > 0) {
-                                    { viewModel.playFeed { episodeId -> onPlayEpisode(episodeId) } }
-                                } else null
-                            )
-                        }
-                    }
+                    // Drawn from the same list that the episode offset is measured
+                    // from, so the two cannot disagree. Which ones appear is
+                    // decided where that list is built, not here.
+                    //
+                    // Keyed, like the episodes below them: when the feed header
+                    // arrives late every following item shifts down one, and a
+                    // keyed list re-anchors on whatever the user was looking at
+                    // instead of letting the content jump under them.
+                    listHeaders.forEach { header ->
+                        item(key = header.name) {
+                            when (header) {
+                                EpisodeListHeader.Feed -> feed?.let {
+                                    FeedHeader(
+                                        feedTitle = it.title,
+                                        feedDescription = it.description,
+                                        imageUrl = it.custom_image_url ?: it.image_url
+                                        ?: feedCoverUrl(baseUrl, it.id, it.url),
+                                        episodeCount = it.episode_count,
+                                        unplayedCount = it.unplayed_count,
+                                        onPlayFeed = if (!isOfflineMode && it.unplayed_count > 0) {
+                                            { viewModel.playFeed { episodeId -> onPlayEpisode(episodeId) } }
+                                        } else null
+                                    )
+                                }
 
-                    // Filter chips: shown once the feed has any episodes and
-                    // hidden in selection mode to keep the batch context clean.
-                    if (!isSelectionMode) {
-                        item {
-                            EpisodeFilterChips(
-                                selected = filter,
-                                onSelect = { viewModel.setFilter(it) },
-                            )
-                        }
-                    }
+                                // Hidden in multi-select to keep the batch context
+                                // clean.
+                                EpisodeListHeader.Filters -> EpisodeFilterChips(
+                                    selected = filter,
+                                    onSelect = { viewModel.setFilter(it) },
+                                )
 
-                    if (orderedIds.isEmpty()) {
-                        item {
-                            EmptyFilterState(
-                                filter = filter,
-                                onClear = { viewModel.setFilter(EpisodeFilter.ALL) }
-                            )
+                                EpisodeListHeader.EmptyState -> EmptyFilterState(
+                                    filter = filter,
+                                    onClear = { viewModel.setFilter(EpisodeFilter.ALL) }
+                                )
+                            }
                         }
                     }
 
@@ -661,7 +792,7 @@ fun EpisodeListScreen(
             SmallFloatingActionButton(
                 onClick = {
                     scope.launch {
-                        scrollingToTop = true
+                        autoScrolling = true
                         try {
                             // Animating the whole way from deep in a feed makes
                             // Compose measure and lay out every row it travels
@@ -678,7 +809,7 @@ fun EpisodeListScreen(
                             // Cleared before the window is moved, and in a finally so
                             // an interrupted animation cannot leave hydration switched
                             // off for the rest of the screen's life.
-                            scrollingToTop = false
+                            autoScrolling = false
                             viewModel.onVisibleRangeChanged(0, 0)
                         }
                     }
