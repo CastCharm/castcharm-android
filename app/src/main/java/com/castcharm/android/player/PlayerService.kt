@@ -67,6 +67,7 @@ import com.castcharm.android.MainActivity
 import com.castcharm.android.R
 import com.castcharm.android.SKIP_SILENCE_KEY
 import com.castcharm.android.data.api.ApiKeyInterceptor
+import com.castcharm.android.data.api.setPlayed
 import com.castcharm.android.data.api.models.clampProgressSeconds
 import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.repository.FeedRepository
@@ -777,7 +778,7 @@ class PlayerService : MediaLibraryService() {
                         val playedFlipped = existing != null && existing.played != targetPlayed
                         if (playedFlipped) {
                             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
-                                CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
+                                CastCharmApp.apiClient.getApi().setPlayed(episodeId, targetPlayed)
                                 db.episodeDao().updatePlayedStatus(episodeId, targetPlayed, now, pending = false)
                             } else {
                                 db.episodeDao().updatePlayedStatus(episodeId, targetPlayed, now, pending = true)
@@ -824,7 +825,9 @@ class PlayerService : MediaLibraryService() {
         try {
             db.episodeDao().updatePlayedStatus(episodeId, true, now)
             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
-                CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
+                // Always "played" — never a flip. Reaching that through a toggle
+                // unmarked any episode the server already had as played.
+                CastCharmApp.apiClient.getApi().setPlayed(episodeId, true)
             } else {
                 db.episodeDao().updatePlayedStatus(episodeId, true, now, pending = true)
             }

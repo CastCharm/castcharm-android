@@ -184,10 +184,12 @@ interface CastCharmApi {
     )
 
     // ---- Played status ------------------------------------------------------
-    // Toggles played/unplayed on the server. The server determines the new state
-    // based on the current state, so no request body is needed.
-    @POST("api/episodes/{episode_id}/played")
-    suspend fun togglePlayed(@Path("episode_id") episodeId: Int)
+    // There is deliberately no binding for POST api/episodes/{id}/played. That
+    // endpoint *toggles*, and no caller in this app ever wanted that: every one
+    // of them had already decided on a target state and used a toggle to reach
+    // it, which only lands on the right answer while the server's copy agrees
+    // with the phone's. A flush that ran twice, or that raced a change made on
+    // another device, drove the state the wrong way. Use setPlayed() below.
 
     // ---- Hide / unhide ------------------------------------------------------
     // Hidden episodes are excluded from the default episode list and counts.
@@ -269,4 +271,25 @@ interface CastCharmApi {
 
     @POST("api/player/prev")
     suspend fun playerPrev(): PlayerStateOut
+}
+
+/**
+ * Sets an episode's played state to an absolute value.
+ *
+ * Routed through the bulk endpoint because its mark_played / mark_unplayed
+ * actions assign rather than flip, which makes this safe to repeat: the phone
+ * decides the target state once, and sending it again — on a retry, a second
+ * flush, or after another device has already made the same change — converges
+ * on that state instead of oscillating around it.
+ *
+ * Every played-state write in the app goes through here. The single-episode
+ * toggle endpoint is intentionally not bound; see the note on it above.
+ */
+suspend fun CastCharmApi.setPlayed(episodeId: Int, played: Boolean) {
+    bulkEpisodeAction(
+        BulkEpisodeRequest(
+            episode_ids = listOf(episodeId),
+            action = if (played) "mark_played" else "mark_unplayed"
+        )
+    )
 }

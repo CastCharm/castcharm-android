@@ -20,6 +20,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.setPlayed
 import com.castcharm.android.data.api.models.clampProgressSeconds
 import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.db.AppDatabase
@@ -100,7 +101,11 @@ class SyncWorker(
                 // Flush played status first (so progress doesn't mark it unplayed
                 // if the episode was toggled played while offline).
                 if (episode.sync_pending_played) {
-                    api.togglePlayed(episode.id)
+                    // Set, not toggle. A flush replays a decision the phone already
+                    // made, so it has to be idempotent — this used to flip whatever
+                    // the server happened to hold, which drove the state backwards
+                    // whenever the server already agreed.
+                    api.setPlayed(episode.id, episode.played)
                     dao.updatePlayedStatus(
                         episode.id,
                         episode.played,

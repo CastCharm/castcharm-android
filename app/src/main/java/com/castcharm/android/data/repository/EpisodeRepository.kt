@@ -2,7 +2,8 @@ package com.castcharm.android.data.repository
 
 // EpisodeRepository coordinates between the remote API and the local EpisodeDao.
 // All writes go through mergeFromApi() so phone-only fields (local_path,
-// sync_pending_*) are never clobbered by server data.
+// sync_pending_*) are never clobbered by server data, and so playback fields
+// with an unsent local change survive a server response that predates it.
 //
 // Progress and played-status changes follow a write-local-then-sync pattern:
 //   - If online: write to server first; on success, write to DB with pending=false.
@@ -15,6 +16,7 @@ package com.castcharm.android.data.repository
 import android.util.Log
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.CastCharmApi
+import com.castcharm.android.data.api.setPlayed
 import com.castcharm.android.data.api.models.EpisodeIndexOut
 import com.castcharm.android.data.api.models.EpisodeOut
 import com.castcharm.android.data.api.models.clampProgressSeconds
@@ -28,6 +30,7 @@ import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.data.api.models.BulkEpisodeRequest
 import com.castcharm.android.data.api.ServerLimits
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import retrofit2.HttpException
 
 // Ids per purely local statement. Nothing leaves the device on these paths, so
@@ -223,35 +226,93 @@ class EpisodeRepository(
     fun getContinueListening(limit: Int = 10): Flow<List<EpisodeEntity>> =
         episodeDao.getContinueListening(limit)
 
-    suspend fun fetchAndCacheContinueListening() {
+    // Shared write path for a batch of freshly fetched episodes: resolve each
+    // against its existing row and the phone's download queue, then merge.
+    private suspend fun mergeRemoteEpisodes(remote: List<EpisodeOut>) {
+        if (remote.isEmpty()) return
+
+        val existingMap = remote
+            .mapNotNull { episodeDao.getEpisodeOnce(it.id) }
+            .associateBy { it.id }
+
+        val db = AppDatabase.getDatabase(CastCharmApp.instance)
+        val allPhoneDownloadEpisodeIds = db.downloadDao()
+            .getAllDownloadsOnceOrdered()
+            .map { it.episode_id }
+            .toSet()
+
+        val merged = remote.map {
+            it.toEntity(
+                existing = existingMap[it.id],
+                hasActivePhoneDownload = it.id in allPhoneDownloadEpisodeIds
+            )
+        }
+
+        episodeDao.mergeFromApi(
+            episodes = merged,
+            activePhoneDownloadEpisodeIds =
+                allPhoneDownloadEpisodeIds.intersect(remote.map { it.id }.toSet())
+        )
+    }
+
+    // The dashboard's Continue Listening card is a live query over the local DB
+    // (played = 0 AND play_position_seconds > 0), so this has to leave the phone
+    // agreeing with the server about the whole set — not merely about the rows
+    // the server happened to send.
+    suspend fun fetchAndCacheContinueListening(limit: Int = 10) {
         if (CastCharmApp.isOfflineMode) {
             Log.d("EpisodeRepository", "Skipping fetchAndCacheContinueListening while offline")
             return
         }
 
         try {
-            val episodes = api.getContinueListening()
-            val existingMap = episodes
-                .mapNotNull { episodeDao.getEpisodeOnce(it.id) }
-                .associateBy { it.id }
+            val remote = api.getContinueListening(limit)
+            mergeRemoteEpisodes(remote)
 
-            val db = AppDatabase.getDatabase(CastCharmApp.instance)
-            val allPhoneDownloadEpisodeIds = db.downloadDao()
-                .getAllDownloadsOnceOrdered()
-                .map { it.episode_id }
-                .toSet()
+            // Reconcile what the server left out. This endpoint answers with a
+            // *set*, and an episode that was finished, cleared, or hidden simply
+            // stops being a member — the response says nothing about it at all.
+            // Merging only what came back can therefore add rows to the phone's
+            // idea of "in progress" but never retire one, so a row that went stale
+            // survived every refresh and sat on the dashboard indefinitely. It got
+            // corrected only when something unrelated happened to fetch it, which
+            // is exactly the episode "updating itself" on screen after you tap
+            // through to it.
+            //
+            // Rows carrying unsent local changes are left alone: there the phone
+            // holds the newer value, and the server's omission is only evidence
+            // about what the server has been told so far.
+            //
+            // Cost is bounded by `limit` single-episode fetches per refresh, and
+            // is usually zero. It is not always zero even when nothing is stale:
+            // the server also requires status = "downloaded" for membership, so an
+            // episode still held only on the phone is omitted for a reason that is
+            // not "finished" and gets re-checked each time. That is the price of
+            // the two predicates differing, and a correct answer is worth it.
+            val remoteIds = remote.map { it.id }.toSet()
+            val orphans = episodeDao.getContinueListening(limit).first()
+                .filter { it.id !in remoteIds }
+                .filterNot { it.sync_pending_played || it.sync_pending_progress }
 
-            val mergedEpisodes = episodes.map { remote ->
-                remote.toEntity(
-                    existing = existingMap[remote.id],
-                    hasActivePhoneDownload = remote.id in allPhoneDownloadEpisodeIds
+            if (orphans.isNotEmpty()) {
+                Log.d(
+                    "EpisodeRepository",
+                    "Reconciling ${orphans.size} stale continue-listening rows"
+                )
+                mergeRemoteEpisodes(
+                    orphans.mapNotNull { local ->
+                        runCatching { api.getEpisode(local.id) }
+                            .onFailure {
+                                Log.w(
+                                    "EpisodeRepository",
+                                    "Could not reconcile episode ${local.id}",
+                                    it
+                                )
+                            }
+                            .getOrNull()
+                    }
                 )
             }
-
-            episodeDao.mergeFromApi(
-                episodes = mergedEpisodes,
-                activePhoneDownloadEpisodeIds = allPhoneDownloadEpisodeIds.intersect(episodes.map { it.id }.toSet())
-            )
         } catch (e: Exception) {
             Log.e("EpisodeRepository", "Error fetching continue listening", e)
         }
@@ -319,7 +380,7 @@ class EpisodeRepository(
             episodeDao.updateProgress(episodeId, position, now, pending = false)
 
             if (existing.played != targetPlayed) {
-                api.togglePlayed(episodeId)
+                api.setPlayed(episodeId, targetPlayed)
                 episodeDao.updatePlayedStatus(
                     episodeId,
                     targetPlayed,
@@ -356,7 +417,7 @@ class EpisodeRepository(
         }
 
         try {
-            api.togglePlayed(episodeId)
+            api.setPlayed(episodeId, newState)
             episodeDao.updatePlayedStatus(episodeId, newState, System.currentTimeMillis(), pending = false)
         } catch (e: Exception) {
             Log.e("EpisodeRepository", "Error toggling played status, marking for later sync", e)
@@ -465,6 +526,15 @@ fun EpisodeOut.toEntity(
         else -> download_progress
     }
 
+    // A sync_pending flag means the phone holds a newer value for the fields it
+    // guards — that is the only reason it is ever set. This mapping used to carry
+    // the flags forward while overwriting those very fields with the server's
+    // copy, leaving a row that advertised an unsent change whose content had
+    // already been destroyed. The user's "mark played" reverted silently, and the
+    // later flush then replayed a toggle against state it no longer matched.
+    val playedSource = existing?.takeIf { it.sync_pending_played }
+    val progressSource = existing?.takeIf { it.sync_pending_progress }
+
     return EpisodeEntity(
         id = id,
         feed_id = feed_id,
@@ -486,9 +556,10 @@ fun EpisodeOut.toEntity(
         author = author,
         link = link,
         hidden = hidden,
-        played = played,
-        play_position_seconds = play_position_seconds,
-        last_played_at = parseServerDateTime(last_played_at),
+        played = playedSource?.played ?: played,
+        play_position_seconds = progressSource?.play_position_seconds ?: play_position_seconds,
+        last_played_at = (playedSource ?: progressSource)?.last_played_at
+            ?: parseServerDateTime(last_played_at),
         status = resolvedStatus,
         // Always preserve phone-only fields from the existing DB row.
         local_path = existing?.local_path,

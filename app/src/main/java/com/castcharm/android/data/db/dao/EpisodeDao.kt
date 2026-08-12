@@ -368,13 +368,26 @@ interface EpisodeDao {
                 else -> ep.download_progress
             }
 
+            // A sync_pending flag means the phone holds a newer value for the
+            // fields it guards. Carrying the flag forward while letting the
+            // server's copy overwrite those fields destroys the very change the
+            // flag exists to protect, so the playback fields follow their flag.
+            val playedSource = ex?.takeIf { it.sync_pending_played }
+            val progressSource = ex?.takeIf { it.sync_pending_progress }
+
             // Build the merged entity: keep all server fields except the four
-            // phone-only fields which are always copied from the existing row.
+            // phone-only fields which are always copied from the existing row,
+            // and any playback field with an unsent local change.
             ep.copy(
                 local_path = ex?.local_path,
                 local_size_bytes = ex?.local_size_bytes,
                 download_progress = mergedProgress,
                 status = mergedStatus,
+                played = playedSource?.played ?: ep.played,
+                play_position_seconds = progressSource?.play_position_seconds
+                    ?: ep.play_position_seconds,
+                last_played_at = (playedSource ?: progressSource)?.last_played_at
+                    ?: ep.last_played_at,
                 sync_pending_progress = ex?.sync_pending_progress ?: false,
                 sync_pending_played = ex?.sync_pending_played ?: false
             )
