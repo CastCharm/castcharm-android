@@ -16,6 +16,7 @@ import com.castcharm.android.CastCharmApp
 import com.castcharm.android.R
 import coil.memory.MemoryCache
 import com.castcharm.android.data.api.ApiKeyInterceptor
+import com.castcharm.android.download.LocalArtwork
 import com.castcharm.android.data.api.PersistentCookieJar
 import com.castcharm.android.data.api.models.feedCoverUrl
 import com.castcharm.android.data.db.AppDatabase
@@ -71,6 +72,11 @@ class PodcastArtworkProvider : ContentProvider() {
          * Auto) and Coil's memory + disk caches (used by the phone UI).
          */
         fun evictFeedArtwork(context: android.content.Context, feedId: Int) {
+            // The durable copy stored beside downloads is keyed by feed id too,
+            // so a recycled id would serve the previous podcast's cover from
+            // disk long after every cache had been cleared.
+            LocalArtwork.deleteFeed(context, feedId)
+
             runCatching {
                 val cacheDir = File(context.cacheDir, CACHE_DIR_NAME)
                 // Filenames carry a token, so sweep by prefix rather than guessing it.
@@ -96,6 +102,14 @@ class PodcastArtworkProvider : ContentProvider() {
                 // Named after the feed is known — see feedArtworkCacheName.
                 val cacheFile = File(cacheDir, feedArtworkCacheName(feedId, feed?.url))
                 if (cacheFile.exists() && cacheFile.length() > 0) return
+
+                // Seed from the durable copy when there is one — no network, and
+                // correct even after the system has cleared this cache.
+                val stored = LocalArtwork.feedFile(context, feedId)
+                if (stored.exists() && stored.length() > 0) {
+                    runCatching { stored.copyTo(cacheFile, overwrite = true) }
+                    if (cacheFile.exists() && cacheFile.length() > 0) return
+                }
                 val episodeWithFeedArt = runBlocking { db.episodeDao().getEpisodeWithFeedImageForFeed(feedId) }
                 val baseUrl = runBlocking {
                     val savedUrl = context.dataStore.data.map { it[stringPreferencesKey("server_url")] }.first()
@@ -211,6 +225,18 @@ class PodcastArtworkProvider : ContentProvider() {
 
         if (cacheFile.exists() && cacheFile.length() > 0) {
             return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+
+        // The copy stored beside downloaded episodes needs no network, which is
+        // the whole point in a car: this cache lives in cacheDir and the system
+        // reclaims it whenever it likes, and the fallback below is an HTTP call
+        // to a server that is usually nowhere in reach at that moment.
+        val stored = LocalArtwork.feedFile(context!!, feedId)
+        if (stored.exists() && stored.length() > 0) {
+            runCatching { stored.copyTo(cacheFile, overwrite = true) }
+            if (cacheFile.exists() && cacheFile.length() > 0) {
+                return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            }
         }
 
         val url = feed?.custom_image_url?.takeIf { it.isNotBlank() }

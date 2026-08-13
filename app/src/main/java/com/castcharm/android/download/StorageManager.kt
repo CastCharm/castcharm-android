@@ -35,10 +35,18 @@ class StorageManager(private val context: Context) {
         }
     }
 
-    // Returns total bytes used by all locally downloaded episode files, as tracked
-    // in the DB (SUM of local_size_bytes). Falls back to 0 if no rows exist.
+    // Returns total bytes used by everything the phone holds for offline use:
+    // the episode files (tracked in the DB as SUM of local_size_bytes) plus the
+    // stored cover art.
+    //
+    // Artwork is measured from disk because there is no column to record it in —
+    // see LocalArtwork. It is a stat per file, bounded by the number of feeds
+    // plus downloaded episodes, against a DB aggregate that already costs a
+    // query. Counting it matters because it is space the user cannot see in any
+    // listing: left out, a quota set to fill the device would be quietly
+    // overshot by everything the artwork occupies.
     suspend fun getTotalUsedBytes(): Long = withContext(Dispatchers.IO) {
-        episodeDao.getTotalDownloadedBytes() ?: 0L
+        (episodeDao.getTotalDownloadedBytes() ?: 0L) + LocalArtwork.totalBytes(context)
     }
 
     fun getQuotaBytes(): Long = quotaBytes
@@ -72,6 +80,28 @@ class StorageManager(private val context: Context) {
         }
     }
 
+    /**
+     * Frees the artwork belonging to an episode whose file has just been deleted,
+     * and the feed's cover once its last download is gone. Returns bytes freed.
+     *
+     * Must be called AFTER the episode's row has been cleared, so the "any
+     * downloads left for this feed" check sees the current state.
+     *
+     * Public because deleting a download is not funnelled through this class:
+     * DownloadsViewModel unlinks files itself in three places rather than going
+     * through deleteLocalFile(), because it deliberately does not reset the
+     * episode's status the way this class does. They must call this, or the
+     * artwork they leave behind keeps counting against the quota with nothing on
+     * screen to explain it.
+     */
+    suspend fun releaseArtworkFor(episodeId: Int, feedId: Int): Long {
+        var freed = LocalArtwork.deleteEpisode(context, episodeId)
+        if (episodeDao.getDownloadedEpisodeIdsByFeed(feedId).isEmpty()) {
+            freed += LocalArtwork.deleteFeed(context, feedId)
+        }
+        return freed
+    }
+
     // Iterates the oldest played episodes (by last_played_at ASC) and deletes
     // their files from disk + resets their DB state, stopping as soon as enough
     // bytes have been freed. Episodes without a local file are skipped silently.
@@ -96,7 +126,7 @@ class StorageManager(private val context: Context) {
                                 status = "pending"
                             )
                         )
-                        freedBytes += fileSize
+                        freedBytes += fileSize + releaseArtworkFor(episode.id, episode.feed_id)
                     }
                 }
             }
@@ -114,6 +144,7 @@ class StorageManager(private val context: Context) {
         episodeDao.update(
             episode.copy(local_path = null, local_size_bytes = null, status = "pending")
         )
+        releaseArtworkFor(episodeId, episode.feed_id)
         removed
     }
 
@@ -129,6 +160,10 @@ class StorageManager(private val context: Context) {
                 )
             }
         }
+        // The stored covers exist to serve those downloads offline, so they go
+        // with them — otherwise "clear all downloads" leaves files behind that
+        // the user has no way to see or reclaim.
+        LocalArtwork.deleteAll(context)
     }
 
     // Returns the File where a downloaded episode should be saved.

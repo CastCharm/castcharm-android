@@ -24,6 +24,7 @@ import com.castcharm.android.data.api.setPlayed
 import com.castcharm.android.data.api.models.clampProgressSeconds
 import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.db.AppDatabase
+import com.castcharm.android.download.LocalArtwork
 import com.castcharm.android.dataStore
 import com.castcharm.android.notifications.NewEpisodesNotifier
 import kotlinx.coroutines.Dispatchers
@@ -82,6 +83,21 @@ class SyncWorker(
         // not the phone's outbound queue.
         runCatching { NewEpisodesNotifier.maybeNotify(applicationContext, api) }
             .onFailure { Log.w("SyncWorker", "New-episodes check failed", it) }
+
+        // Piggyback: make sure every feed with episodes downloaded to this device
+        // also has its cover stored locally. New downloads store it as they
+        // finish, but anything already on the phone would otherwise never
+        // acquire one — and artwork is only of any use offline if it is fetched
+        // while there is still a network. Runs before the early return below,
+        // because having nothing to flush is the normal case, not a reason to
+        // skip this. Bounded by the number of feeds, and each call is a no-op
+        // once the file exists.
+        runCatching {
+            val downloaded = dao.getDownloadedEpisodesOnce()
+            downloaded.map { it.feed_id }.distinct()
+                .forEach { LocalArtwork.ensureFeed(applicationContext, it) }
+            downloaded.forEach { LocalArtwork.ensureEpisode(applicationContext, it.id) }
+        }.onFailure { Log.w("SyncWorker", "Cover art backfill failed", it) }
 
         // Fetch all episodes with pending sync flags set.
         val pending = dao.getPendingSyncEpisodes()

@@ -384,6 +384,21 @@ class DownloadWorker(
             // hiccup can't roll back the completed download.
             BandwidthTracker.record(applicationContext, finalSize)
 
+            // Store cover art beside the audio. Done here because this is the
+            // moment the phone commits to keeping the episode offline, and
+            // artwork that only exists in a cache is not offline — cacheDir is
+            // reclaimed by the system whenever it wants the space, which left
+            // downloaded episodes showing placeholders. Both the feed's cover
+            // and the episode's own, which most episodes do not have; that call
+            // simply finds nothing and the row falls back to the feed cover,
+            // exactly as it does online. Outside the transaction and
+            // best-effort: artwork must never fail a download whose file is
+            // already written.
+            runCatching {
+                LocalArtwork.ensureFeed(applicationContext, episode.feed_id)
+                LocalArtwork.ensureEpisode(applicationContext, episodeId)
+            }
+
             completedSuccessfully = true
             // Clear partialFile so the catch blocks don't attempt to delete
             // the fully-written file if an exception somehow fires after this.
