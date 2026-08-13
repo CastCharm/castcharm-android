@@ -86,6 +86,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -781,10 +782,39 @@ fun EpisodeListScreen(
         val showScrollToTop by remember {
             derivedStateOf { listState.firstVisibleItemIndex > SCROLL_TO_TOP_AFTER_ROWS }
         }
+
+        // Being far enough down only makes the button *eligible*. It also has to
+        // have been of recent use: a list that has been still for a few seconds is
+        // one the user is reading rather than traversing, and the button covers the
+        // corner of a card while they do it. So it withdraws, and any scroll brings
+        // it back — position permitting.
+        //
+        // Read through snapshotFlow rather than in composition, so a gesture
+        // starting and stopping does not invalidate this whole subtree. collectLatest
+        // cancels a pending delay the moment scrolling resumes, which is what makes
+        // the button come back immediately instead of after the countdown expires.
+        var scrollIdle by remember { mutableStateOf(false) }
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }
+                .collectLatest { scrolling ->
+                    if (scrolling) {
+                        scrollIdle = false
+                    } else {
+                        delay(SCROLL_TO_TOP_IDLE_MS)
+                        scrollIdle = true
+                    }
+                }
+        }
+
         AnimatedVisibility(
-            visible = showScrollToTop && !isSelectionMode,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            visible = showScrollToTop && !isSelectionMode && !scrollIdle,
+            // Deliberately asymmetric. Appearing answers a gesture, so it wants to
+            // feel immediate; disappearing answers nothing the user did, and an
+            // abrupt vanish at the edge of vision reads as a glitch. The long exit
+            // also stays hit-testable the whole way down, so a tap already on its
+            // way still lands.
+            enter = fadeIn(tween(durationMillis = 150)),
+            exit = fadeOut(tween(durationMillis = 700)),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = 16.dp)

@@ -110,6 +110,16 @@ const val SCROLL_TO_TOP_AFTER_ROWS = 8
 // grow with how deep into the feed the user was.
 const val SCROLL_TO_TOP_RUNWAY = 12
 
+// How long the list has to sit still before the jump-to-top button fades out. It
+// sits over the bottom-right of a row, so leaving it up while the user is reading
+// hides part of the very content they stopped to look at. Scrolling brings it
+// straight back, which is the only moment it is any use.
+//
+// Tuned short because re-summoning it is free — the hand is already in scrolling
+// posture — unlike a media control, which is why those sit at five seconds. Two
+// and a half seconds was tried on device and still felt like loitering.
+const val SCROLL_TO_TOP_IDLE_MS = 1_500L
+
 // Arriving from a deep link, the list holds still at the top for this long before
 // travelling down to the episode. Long enough for the header art and the first
 // rows to paint, so the trip starts from a page that looks finished rather than

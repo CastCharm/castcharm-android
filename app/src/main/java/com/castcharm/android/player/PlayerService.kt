@@ -97,6 +97,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
@@ -118,6 +119,16 @@ private const val SECTION_DOWNLOADS = "section_downloads"
 // Suffix appended to packageName to form the authority of PodcastArtworkProvider.
 // Must match the authority declared in AndroidManifest.xml.
 private const val ARTWORK_AUTHORITY_SUFFIX = ".artwork"
+
+// Longest a browse request will wait for the server pull before giving up and
+// serving cached rows.
+//
+// Chosen short on purpose, because the two failure modes are not symmetric: wait
+// longer than the head unit's own timeout and the section fails to render at all,
+// whereas giving up early merely shows cached rows for a moment — and the
+// notifyBrowseNodes() call at the end of the refresh makes Android Auto re-query
+// as soon as the data lands. Stale-then-corrected beats empty.
+private const val BROWSE_REFRESH_WAIT_MS = 3_000L
 
 
 // Mutex prevents a race where multiple coroutines call ensureApiClientInitialized
@@ -318,23 +329,75 @@ class PlayerService : MediaLibraryService() {
 
     private var mediaSession: MediaLibrarySession? = null
     private lateinit var player: ExoPlayer
+    private var sessionCallback: PlayerLibrarySessionCallback? = null
     private val db by lazy { AppDatabase.getDatabase(this) }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var progressJob: Job? = null
     private var connectivityModeJob: Job? = null
+    private var ancillaryStarted = false
     @Volatile
     private var latestPlaybackSpeed: Float = 1.0f
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "PlayerService.onCreate start")
-        try {
-            // Kick off lazy ApiClient init in the background so it's ready before
-            // the first playback request or browse query arrives.
-            serviceScope.launch {
-                ensureApiClientInitializedFromStorage(this@PlayerService)
-            }
+        ensureSessionReady()
+    }
 
+    /**
+     * Builds the player and the MediaLibrarySession, and returns the session.
+     *
+     * Called from onCreate() and again from onGetSession() whenever the session is
+     * still missing. That retry is the point of the split: a throw in here used to
+     * be caught, logged, and left the service running with mediaSession == null
+     * forever — and since onGetSession() returning null is Media3's way of
+     * REJECTING a connection, a single bad start meant Android Auto saw no app at
+     * all, permanently, with nothing to recover it but the service being destroyed.
+     * Now a failed start costs one connection attempt instead of the whole session.
+     *
+     * Each stage is separately guarded so a retry re-does only what is missing: the
+     * player and its listener are built once (a second listener would double every
+     * progress-tracking and speed callback), and the ancillary coroutines start once.
+     *
+     * Media3 dispatches onGetSession() on the main thread, as onCreate() is, so the
+     * two callers are already serialised; @Synchronized is belt-and-braces against
+     * ever building two sessions for one player.
+     */
+    @Synchronized
+    private fun ensureSessionReady(): MediaLibrarySession? {
+        mediaSession?.let { return it }
+        try {
+            buildPlayerIfNeeded()
+            val callback = buildCallbackIfNeeded()
+            callback.updateLatestPlaybackSpeed(latestPlaybackSpeed)
+
+            // Tapping the notification opens MainActivity rather than a specific
+            // episode screen — the player state is available via the global PlayerController.
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            mediaSession = MediaLibrarySession.Builder(this, player, callback)
+                .setSessionActivity(pendingIntent)
+                .setMediaButtonPreferences(initialMediaButtonPreferences(latestPlaybackSpeed))
+                .build()
+            Log.d(TAG, "MediaLibrarySession built OK, session=$mediaSession")
+
+            startAncillaryJobsOnce()
+        } catch (e: Exception) {
+            Log.e(TAG, "PlayerService: session build FAILED — will retry on next connect", e)
+        }
+        return mediaSession
+    }
+
+    private fun buildPlayerIfNeeded() {
+        if (::player.isInitialized) return
+        // Scoping block: the streaming client and data-source factory are wiring for
+        // the player and should not be reachable once it is built.
+        run {
             // Build a dedicated OkHttpClient for streaming. The interceptor calls
             // ensureApiClientInitializedBlocking() to handle the post-reboot case
             // where the service starts before the ApiClient is initialized.
@@ -398,40 +461,32 @@ class PlayerService : MediaLibraryService() {
                 .build()
             Log.d(TAG, "ExoPlayer built OK")
 
-            // Apply the current skip-silence preference to the freshly-built
-            // player, then keep it in sync as the user toggles the setting.
-            serviceScope.launch {
-                this@PlayerService.dataStore.data
-                    .map { it[SKIP_SILENCE_KEY] ?: false }
-                    .collectLatest { enabled ->
-                        withContext(Dispatchers.Main) {
-                            if (::player.isInitialized) {
-                                player.skipSilenceEnabled = enabled
-                            }
-                        }
-                    }
-            }
-
             latestPlaybackSpeed = player.playbackParameters.speed
+        }
+    }
 
-            val callback = PlayerLibrarySessionCallback(
-                context = this,
-                feedDao = db.feedDao(),
-                episodeDao = db.episodeDao(),
-                player = player,
-                scope = serviceScope,
-                sessionProvider = { mediaSession },
-                // Fired from onGetLibraryRoot so the head-unit browse tree
-                // always kicks a fresh server pull. Debounced inside
-                // refreshFromServerForBrowse so repeated browses in the same
-                // session don't cause a request storm.
-                onBrowseRoot = {
-                    serviceScope.launch { refreshFromServerForBrowse("browse_root") }
-                },
-            )
-            callback.updateLatestPlaybackSpeed(latestPlaybackSpeed)
+    private fun buildCallbackIfNeeded(): PlayerLibrarySessionCallback {
+        sessionCallback?.let { return it }
 
-            player.addListener(object : Player.Listener {
+        val callback = PlayerLibrarySessionCallback(
+            context = this,
+            feedDao = db.feedDao(),
+            episodeDao = db.episodeDao(),
+            player = player,
+            scope = serviceScope,
+            sessionProvider = { mediaSession },
+            // Fired from onGetLibraryRoot so the head-unit browse tree
+            // always kicks a fresh server pull. Debounced inside
+            // refreshFromServerForBrowse so repeated browses in the same
+            // session don't cause a request storm.
+            onBrowseRoot = { launchBrowseRefresh("browse_root") },
+            // Lets a section browse wait for that pull to actually land, so the
+            // head unit renders current data rather than the previous drive's.
+            awaitBrowseRefresh = { awaitBrowseRefresh() },
+        )
+        sessionCallback = callback
+
+        player.addListener(object : Player.Listener {
                 // Start/stop the 1-second progress sync loop in sync with play/pause.
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     if (isPlaying) startProgressTracking() else stopProgressTracking()
@@ -473,68 +528,113 @@ class PlayerService : MediaLibraryService() {
                 }
             })
 
-            // Tapping the notification opens MainActivity rather than a specific
-            // episode screen — the player state is available via the global PlayerController.
-            val pendingIntent = PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+        return callback
+    }
 
-            mediaSession = MediaLibrarySession.Builder(this, player, callback)
-                .setSessionActivity(pendingIntent)
-                .setMediaButtonPreferences(initialMediaButtonPreferences(latestPlaybackSpeed))
-                .build()
-            Log.d(TAG, "MediaLibrarySession built OK, session=$mediaSession")
+    /**
+     * Starts the long-lived coroutines that support the session but are not
+     * required to build it. Deliberately separate from ensureSessionReady()'s
+     * critical path: none of this should be able to stop a session existing, and
+     * a retried session build must not start a second copy of any of it.
+     */
+    private fun startAncillaryJobsOnce() {
+        if (ancillaryStarted) return
+        ancillaryStarted = true
 
-            // Re-notify whenever the connectivity mode changes (online ↔ offline)
-            // so Android Auto's browse tree updates to show/hide network sections.
-            // This is a genuine structural change to the tree, so a full rebuild is
-            // warranted here — unlike the routine refreshes, which are targeted.
-            //
-            // collectLatest fires immediately with the current mode, which doubles
-            // as the initial "here is the library" notification on startup; the
-            // separate startup notify that used to sit here was redundant with it.
-            connectivityModeJob = serviceScope.launch {
-                CastCharmApp.connectivityMode.collectLatest { mode ->
-                    Log.d(TAG, "AA connectivity mode changed: $mode")
-                    notifyBrowseNodes(
-                        setOf(
-                            ROOT_ID, SECTION_CONTINUE, SECTION_RECENT,
-                            SECTION_PODCASTS, SECTION_DOWNLOADS
-                        )
-                    )
+        // Kick off lazy ApiClient init in the background so it's ready before
+        // the first playback request or browse query arrives.
+        serviceScope.launch {
+            ensureApiClientInitializedFromStorage(this@PlayerService)
+        }
+
+        // Apply the current skip-silence preference to the freshly-built
+        // player, then keep it in sync as the user toggles the setting.
+        serviceScope.launch {
+            this@PlayerService.dataStore.data
+                .map { it[SKIP_SILENCE_KEY] ?: false }
+                .collectLatest { enabled ->
+                    withContext(Dispatchers.Main) {
+                        if (::player.isInitialized) {
+                            player.skipSilenceEnabled = enabled
+                        }
+                    }
                 }
-            }
+        }
 
-            // Stop playback and cancel in-flight progress syncs whenever the session
-            // is invalidated (logout, session expiry, or server-side auth rejection).
-            // Without this, the progress loop keeps firing API calls with a dead session
-            // and the player stays running even though the user has been logged out.
-            serviceScope.launch {
-                CastCharmApp.authState.collect { state ->
-                    if (state is AppAuthState.NotLoggedIn) {
-                        stopProgressTracking()
-                        withContext(Dispatchers.Main) {
-                            if (::player.isInitialized) {
-                                player.stop()
-                                player.clearMediaItems()
-                            }
+        // Re-notify whenever the connectivity mode changes (online ↔ offline)
+        // so Android Auto's browse tree updates to show/hide network sections.
+        // This is a genuine structural change to the tree, so a full rebuild is
+        // warranted here — unlike the routine refreshes, which are targeted.
+        //
+        // collectLatest fires immediately with the current mode, which doubles
+        // as the initial "here is the library" notification on startup; the
+        // separate startup notify that used to sit here was redundant with it.
+        connectivityModeJob = serviceScope.launch {
+            CastCharmApp.connectivityMode.collectLatest { mode ->
+                Log.d(TAG, "AA connectivity mode changed: $mode")
+                notifyBrowseNodes(
+                    setOf(
+                        ROOT_ID, SECTION_CONTINUE, SECTION_RECENT,
+                        SECTION_PODCASTS, SECTION_DOWNLOADS
+                    )
+                )
+            }
+        }
+
+        // Stop playback and cancel in-flight progress syncs whenever the session
+        // is invalidated (logout, session expiry, or server-side auth rejection).
+        // Without this, the progress loop keeps firing API calls with a dead session
+        // and the player stays running even though the user has been logged out.
+        serviceScope.launch {
+            CastCharmApp.authState.collect { state ->
+                if (state is AppAuthState.NotLoggedIn) {
+                    stopProgressTracking()
+                    withContext(Dispatchers.Main) {
+                        if (::player.isInitialized) {
+                            player.stop()
+                            player.clearMediaItems()
                         }
                     }
                 }
             }
-
-            // Warm the local DB from the server on service startup. Covers the
-            // common Android Auto scenario: the app hasn't been touched in days,
-            // the process was killed, the user plugs into the car and expects
-            // to see current episodes. Without this the head unit reads stale
-            // rows and only refreshes once the phone app is reopened.
-            serviceScope.launch { refreshFromServerForBrowse("service_create") }
-        } catch (e: Exception) {
-            Log.e(TAG, "PlayerService.onCreate FAILED — session will be null", e)
         }
+
+        // Warm the local DB from the server on service startup. Covers the
+        // common Android Auto scenario: the app hasn't been touched in days,
+        // the process was killed, the user plugs into the car and expects
+        // to see current episodes. Without this the head unit reads stale
+        // rows and only refreshes once the phone app is reopened.
+        launchBrowseRefresh("service_create")
+    }
+
+    // Handle on the browse refresh currently in flight, so a section browse can
+    // wait for it rather than racing it. Coalescing matters as much as the handle:
+    // service-create and the first browse-root fire within milliseconds of each
+    // other, and without this the second would start a duplicate pull.
+    @Volatile
+    private var browseRefreshJob: Job? = null
+
+    private fun launchBrowseRefresh(reason: String) {
+        val existing = browseRefreshJob
+        if (existing != null && existing.isActive) {
+            Log.d(TAG, "AA browse refresh already in flight, joining it (reason=$reason)")
+            return
+        }
+        browseRefreshJob = serviceScope.launch { refreshFromServerForBrowse(reason) }
+    }
+
+    /**
+     * Waits for the in-flight browse refresh, capped so a dead network cannot hold
+     * the head unit's list hostage. On expiry the caller falls through and serves
+     * whatever the DB holds — which is the behaviour that keeps downloaded episodes
+     * reachable with no server. The refresh, if it lands later, calls
+     * notifyBrowseNodes() and Android Auto re-queries.
+     */
+    private suspend fun awaitBrowseRefresh() {
+        val job = browseRefreshJob ?: return
+        if (!job.isActive) return
+        val completed = withTimeoutOrNull(BROWSE_REFRESH_WAIT_MS) { job.join() } != null
+        Log.d(TAG, "AA browse wait: ${if (completed) "refresh landed" else "timed out, serving cache"}")
     }
 
     // Timestamp of the last successful (or attempted) server refresh triggered
@@ -562,8 +662,21 @@ class PlayerService : MediaLibraryService() {
             Log.d(TAG, "AA browse refresh skipped (last ran ${now - lastBrowseRefreshMs}ms ago, reason=$reason)")
             return
         }
-        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) {
-            Log.d(TAG, "AA browse refresh skipped (offline/uninitialised, reason=$reason)")
+        if (CastCharmApp.isOfflineMode) {
+            Log.d(TAG, "AA browse refresh skipped (offline mode, reason=$reason)")
+            return
+        }
+
+        // Wait for the ApiClient instead of bailing when it isn't ready yet. This
+        // is the whole staleness bug: on a cold start — the car plug-in case,
+        // where the process is usually dead — startAncillaryJobsOnce() has only
+        // just *launched* initialisation, so an isInitialized check here loses the
+        // race and skips the one refresh that mattered. onGetLibraryRoot fires once
+        // per browse session, so there was no second chance and the head unit
+        // showed the previous drive's data until something else happened to sync.
+        ensureApiClientInitializedFromStorage(this)
+        if (!CastCharmApp.apiClient.isInitialized) {
+            Log.d(TAG, "AA browse refresh skipped (no server configured, reason=$reason)")
             return
         }
         lastBrowseRefreshMs = now
@@ -907,14 +1020,28 @@ class PlayerService : MediaLibraryService() {
         connectivityModeJob?.cancel()
         mediaSession?.release()
         mediaSession = null
-        player.release()
+        // Guarded because onCreate() catches its own failures: if it threw before
+        // reaching the ExoPlayer.Builder call, this lateinit was never assigned and
+        // an unguarded release() throws UninitializedPropertyAccessException out of
+        // onDestroy — turning a recoverable bad start into a process kill, on the
+        // exact path that is supposed to be cleaning up after one.
+        if (::player.isInitialized) {
+            player.release()
+        }
         serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         Log.d(TAG, "onGetSession: pkg=${controllerInfo.packageName}")
-        return mediaSession
+        // Rebuild on demand if the session is missing. Returning null here is how
+        // Media3 rejects a connection, so without this a failed start is
+        // indistinguishable — to Android Auto — from the app not being installed.
+        val session = mediaSession ?: ensureSessionReady()
+        if (session == null) {
+            Log.e(TAG, "onGetSession: rebuild failed, rejecting ${controllerInfo.packageName}")
+        }
+        return session
     }
 }
 
@@ -930,6 +1057,9 @@ private class PlayerLibrarySessionCallback(
     // opened the browse tree" signal. Used to pull fresh data from the server
     // so the head unit doesn't render a snapshot from days ago.
     private val onBrowseRoot: () -> Unit = {},
+    // Suspends until the pull started by onBrowseRoot has landed, or until its
+    // cap expires. Called by the network-backed sections before they read the DB.
+    private val awaitBrowseRefresh: suspend () -> Unit = {},
 ) : MediaLibraryService.MediaLibrarySession.Callback {
 
     private val connectedControllers = linkedSetOf<MediaSession.ControllerInfo>()
@@ -1156,6 +1286,19 @@ private class PlayerLibrarySessionCallback(
                 return@asyncFuture LibraryResult.ofItemList(ImmutableList.of(), params)
             }
 
+            // Sections whose contents come from the server wait for the refresh
+            // that onGetLibraryRoot kicked off, so the head unit's first render is
+            // current rather than a snapshot of the last drive. Deliberately not
+            // applied to ROOT (headers only — keeping the connect fast matters more)
+            // nor to DOWNLOADS, which is local by definition and must stay instant
+            // and available with no server at all.
+            if (parentId == SECTION_CONTINUE ||
+                parentId == SECTION_RECENT ||
+                parentId == SECTION_PODCASTS
+            ) {
+                awaitBrowseRefresh()
+            }
+
             val allItems: List<MediaItem>
             val resultParams: MediaLibraryService.LibraryParams
 
@@ -1211,6 +1354,12 @@ private class PlayerLibrarySessionCallback(
                     val shouldRefreshAll = page <= 0 &&
                             (existingCount == 0 || feedBrowseRefreshDue(feedId))
 
+                    // Same cold-start race as refreshFromServerForBrowse: awaiting
+                    // init rather than testing it is what stops the first browse of
+                    // a feed from serving stale rows. No-op once initialised.
+                    if (!CastCharmApp.isOfflineMode && shouldRefreshAll) {
+                        ensureApiClientInitializedFromStorage(context)
+                    }
                     if (!CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized && shouldRefreshAll) {
                         try {
                             val api = CastCharmApp.apiClient.getApi()
