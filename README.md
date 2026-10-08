@@ -1,6 +1,12 @@
 # CastCharm Android
 
-Native Android client for CastCharm. This repository is intended for developers who want to build, inspect, test, or contribute to the Android app. End-user installation and server setup documentation belong in the main CastCharm documentation.
+Native Android client for [CastCharm](https://github.com/CastCharm/castcharm), the self-hosted podcast manager. This repository is for people who want to build, inspect, test, or contribute to the app. If you just want to use it, see the [Android page on castcharm.org](https://www.castcharm.org/android.html).
+
+## Get the app
+
+Signed release builds are published on the [Releases page](https://github.com/CastCharm/castcharm-android/releases) as a plain `.apk` you install directly on the phone (Android will ask you to allow installs from your browser or file manager the first time). Each release is signed with the same key, so new versions install over the old one without losing your data. If you use an updater such as Obtainium, point it at this repository and it will pick up new releases on its own. A Google Play listing is planned; until then, GitHub Releases is the official source.
+
+The app needs a CastCharm server to talk to; it does nothing on its own. Server setup is covered in the [installation guide](https://www.castcharm.org/install.html).
 
 The app connects to an existing CastCharm server, authenticates against that server, caches feed and episode metadata locally, streams or downloads episode audio, reports playback progress back to the server, and exposes a Media3 media library for Android Auto.
 
@@ -20,7 +26,11 @@ The Android app currently includes:
 - Jetpack Compose UI
 - App settings, including storage/offline-related controls
 - Custom and feed-based playlists with drag-to-reorder support (feature toggleable in settings)
-- Auto-advance playback when queue context is active
+- Queue playback: feeds and playlists load as a real player queue that advances on its own, including in Android Auto
+- "Listen in chronological order" per podcast (a story or serial): Play resumes where you left off or starts at the oldest unheard episode, synced with the server and the web app
+- Pull-to-refresh, filter chips and multi-select batch actions on episode lists
+- Wi-Fi-only downloads, skip-silence playback, new-episode notifications, monthly download bandwidth tracking
+- OPML import of subscriptions
 
 ## Repository layout
 
@@ -120,35 +130,26 @@ Android Auto support is provided through Media3's media library/session APIs. Th
 
 ## Backend API endpoints used
 
-The app currently depends on these CastCharm server endpoints:
+The app talks to the same REST API the web interface uses (documented at `/api/docs` on any server). The Retrofit interface in `data/api/CastCharmApi.kt` is the authoritative list; grouped by area it currently covers:
 
-| Endpoint | Purpose |
+| Area | Endpoints |
 |---|---|
-| `GET /api/auth/status` | Check current authentication state |
-| `POST /api/auth/login` | Log in to the CastCharm server |
-| `GET /api/feeds` | Fetch feed list |
-| `GET /api/feeds/{id}/episodes` | Fetch episodes for a feed |
-| `GET /api/episodes/{id}/stream` | Stream episode audio |
-| `GET /api/episodes/{id}/file` | Download full episode file |
-| `POST /api/episodes/{id}/progress` | Save playback position |
-| `POST /api/episodes/{id}/played` | Toggle played state |
-| `GET /api/episodes/continue-listening` | Fetch resumable episodes |
-| `GET /api/feeds/{id}/cover.jpg` | Fetch feed artwork |
-| `GET /api/playlists` | Fetch all playlists |
-| `POST /api/playlists` | Create a new playlist |
-| `PUT /api/playlists/{id}` | Update playlist metadata |
-| `DELETE /api/playlists/{id}` | Delete a playlist |
-| `GET /api/playlists/{id}/episodes` | Fetch episodes in a playlist |
-| `POST /api/playlists/{id}/episodes` | Add episode to playlist |
-| `DELETE /api/playlists/{id}/episodes/{episode_id}` | Remove episode from playlist |
-| `PUT /api/playlists/{id}/episodes/reorder` | Reorder episodes in playlist |
-| `GET /api/playlists/episode-memberships` | Get all playlists containing an episode |
-| `GET /api/playlists/feed-memberships` | Get playlist memberships for episodes in a feed |
-| `POST /api/player/play` | Start playback with context (feed or playlist) |
-| `POST /api/player/next` | Skip to next episode in queue |
-| `POST /api/player/prev` | Go to previous episode in queue |
+| Auth and keys | `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/exchange-key`, `GET/PATCH /api/settings/api-keys…`, `DELETE /api/settings/api-keys/self` |
+| Server info | `GET /api/status`, `GET /api/settings`, `GET /api/stats`, `GET /api/limits` |
+| Feeds | `GET/POST /api/feeds`, `GET/PUT/DELETE /api/feeds/{id}`, `GET /api/feeds/{id}/episodes`, `GET /api/feeds/{id}/episode-index`, `GET /api/feeds/{id}/cover.jpg`, `POST /api/feeds/{id}/refresh`, `POST /api/feeds/refresh-all` |
+| Episodes | `GET /api/episodes`, `GET /api/episodes/{id}`, `GET /api/episodes/{id}/stream`, `GET /api/episodes/{id}/cover.jpg`, `POST /api/episodes/{id}/progress`, `POST /api/episodes/{id}/download`, `POST /api/episodes/{id}/retry`, `POST /api/episodes/{id}/hide` and `/unhide`, `POST /api/episodes/bulk` (set played/unplayed), `GET /api/episodes/continue-listening`, `GET /api/episodes/suggestions` |
+| Playlists | `GET/POST /api/playlists`, `PUT/DELETE /api/playlists/{id}`, `GET/POST /api/playlists/{id}/episodes`, `DELETE /api/playlists/{id}/episodes/{episode_id}`, `PUT /api/playlists/{id}/episodes/reorder`, `GET /api/playlists/episode-memberships`, `GET /api/playlists/feed-memberships` |
+| Player queue | `GET/PUT /api/player/state`, `POST /api/player/play`, `POST /api/player/next`, `POST /api/player/prev` |
 
-If server endpoint behavior changes, update the Retrofit interface, repositories, playback/download paths, and any related tests or manual QA notes together.
+Played state is always *set* (via the bulk endpoint), never toggled, so a retried request can't flip it the wrong way. If server endpoint behavior changes, update the Retrofit interface, repositories, playback/download paths, and any related tests or manual QA notes together.
+
+## Releases
+
+Releases are signed in Android Studio (Build → Generate Signed Bundle / APK → APK → release) and published to GitHub with `release.sh`, which tags the current commit with the version from `app/build.gradle.kts`, attaches the APK as `castcharm-v<version>.apk`, and generates release notes from the commits since the previous tag. It needs the GitHub CLI (`gh`) and refuses to run with uncommitted changes, a stale APK, or an existing tag. Bump `versionCode` and `versionName` before every release.
+
+## Contributing and license
+
+Issues and pull requests are welcome. Please open an issue first for anything beyond a small fix so the approach can be agreed before the work. The code is released under the MIT License (see `LICENSE`).
 
 
 ## Main dependencies
