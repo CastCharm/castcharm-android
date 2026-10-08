@@ -1,0 +1,8 @@
+# Normalise line endings so a Windows editor cannot dirty the whole tree.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.webp binary
+*.jar binary
+*.dm binary
