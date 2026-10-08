@@ -20,9 +20,11 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.models.PlayedRequest
 import com.castcharm.android.data.api.models.ProgressRequest
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
+import com.castcharm.android.notifications.NewEpisodesNotifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -33,12 +35,14 @@ class SyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        // Don't try to sync while explicitly in offline mode — the user chose to
-        // work offline and we should not break that expectation. Return retry() so
-        // WorkManager will try again the next time it fires.
+        // Don't try to sync while explicitly in offline mode — the user chose
+        // to work offline. Return success() rather than retry(): offline mode
+        // isn't a failure, and a one-time worker enqueued while offline
+        // shouldn't burn backoff attempts. The periodic worker will run again
+        // on its next scheduled tick regardless.
         if (CastCharmApp.isOfflineMode) {
             Log.d("SyncWorker", "Skipping sync because offline mode is active")
-            return@withContext Result.retry()
+            return@withContext Result.success()
         }
 
         val db = AppDatabase.getDatabase(applicationContext)
@@ -71,6 +75,19 @@ class SyncWorker(
             return@withContext Result.retry()
         }
 
+        // Piggyback: check for new episodes on the server and post a summary
+        // notification if the user opted in. Runs regardless of whether there
+        // are pending flushes so the notification cadence tracks feed activity,
+        // not the phone's outbound queue.
+        runCatching { NewEpisodesNotifier.maybeNotify(applicationContext, api) }
+            .onFailure { Log.w("SyncWorker", "New-episodes check failed", it) }
+
+        // Housekeeping that needs the server: re-link any downloaded files the
+        // local table lost track of, and restart any stalled download queue.
+        runCatching { com.castcharm.android.download.StorageManager(applicationContext).reconcileOrphanFiles(api) }
+            .onFailure { Log.w("SyncWorker", "Orphan file reconcile failed", it) }
+        runCatching { com.castcharm.android.download.DownloadScheduler(applicationContext).kickQueue() }
+
         // Fetch all episodes with pending sync flags set.
         val pending = dao.getPendingSyncEpisodes()
         if (pending.isEmpty()) {
@@ -88,14 +105,12 @@ class SyncWorker(
             try {
                 // Flush played status first (so progress doesn't mark it unplayed
                 // if the episode was toggled played while offline).
+                // Only the flag is cleared, and only if the row still holds the
+                // value that was sent. Rewriting the value here would revert any
+                // progress the player wrote while this flush was in flight.
                 if (episode.sync_pending_played) {
-                    api.togglePlayed(episode.id)
-                    dao.updatePlayedStatus(
-                        episode.id,
-                        episode.played,
-                        episode.last_played_at ?: System.currentTimeMillis(),
-                        pending = false
-                    )
+                    api.setPlayed(episode.id, PlayedRequest(episode.played))
+                    dao.clearPendingPlayedIf(episode.id, episode.played)
                 }
 
                 if (episode.sync_pending_progress) {
@@ -103,12 +118,16 @@ class SyncWorker(
                         episode.id,
                         ProgressRequest(episode.play_position_seconds)
                     )
-                    dao.updateProgress(
-                        episode.id,
-                        episode.play_position_seconds,
-                        episode.last_played_at ?: System.currentTimeMillis(),
-                        pending = false
-                    )
+                    dao.clearPendingProgressIf(episode.id, episode.play_position_seconds)
+                }
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 404) {
+                    // The episode no longer exists on the server; nothing to flush.
+                    Log.w("SyncWorker", "Episode ${episode.id} gone from server; dropping pending changes")
+                    dao.clearPendingFlags(episode.id)
+                } else {
+                    Log.e("SyncWorker", "Failed to sync episode ${episode.id}: HTTP ${e.code()}")
+                    allSuccessful = false
                 }
             } catch (e: Exception) {
                 Log.e("SyncWorker", "Failed to sync episode ${episode.id}", e)

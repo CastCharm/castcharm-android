@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Podcasts
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,11 +107,25 @@ fun DashboardScreen(
             return@Scaffold
         }
 
+        val anyLoading = uiState.statsLoading ||
+            uiState.feedHealthLoading ||
+            uiState.continueListeningLoading ||
+            uiState.newestLoading ||
+            uiState.suggestionsLoading ||
+            uiState.backlogLoading
+
+        PullToRefreshBox(
+            isRefreshing = anyLoading,
+            onRefresh = { viewModel.refresh() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = padding.calculateTopPadding()),
+        ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = 12.dp,
-                top = 12.dp + padding.calculateTopPadding(),
+                top = 12.dp,
                 end = 12.dp,
                 bottom = 12.dp
             ),
@@ -334,6 +349,7 @@ fun DashboardScreen(
                 }
             }
         }
+        }
     }
 }
 
@@ -479,11 +495,15 @@ private fun EpisodeRow(
     onTitleClick: () -> Unit,
     onPlayClick: () -> Unit
 ) {
-    val baseUrl = CastCharmApp.apiClient.getBaseUrl()
+    val baseUrl = if (CastCharmApp.apiClient.isInitialized) {
+        CastCharmApp.apiClient.getBaseUrl()
+    } else {
+        ""
+    }
     val imageUrl = episode.custom_image_url
         ?: episode.episode_image_url
         ?: episode.feed_image_url
-        ?: "${baseUrl}api/feeds/${episode.feed_id}/cover.jpg"
+        ?: if (baseUrl.isNotBlank()) "${baseUrl}api/feeds/${episode.feed_id}/cover.jpg" else null
 
     Row(
         modifier = Modifier

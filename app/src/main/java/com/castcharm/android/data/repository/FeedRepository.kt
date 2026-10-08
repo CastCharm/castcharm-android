@@ -59,7 +59,8 @@ class FeedRepository(
                 episode_count = feed.episode_count,
                 unplayed_count = feed.unplayed_count,
                 downloaded_count = feed.downloaded_count,
-                playback_speed = existingById[feed.id]?.playback_speed
+                playback_speed = existingById[feed.id]?.playback_speed,
+                play_order = feed.play_order
             )
         }
 
@@ -67,6 +68,12 @@ class FeedRepository(
 
         // If the server returns no feeds, delete all local feeds (the user has no
         // active subscriptions). Otherwise, prune only the feeds missing from the response.
+        // The cascade will remove the episodes of any feed that is gone; take
+        // their files with them, or they sit on disk uncounted and unreachable.
+        val doomed = existingById.keys.filterNot { it in remoteIds }
+        if (doomed.isNotEmpty()) {
+            releaseFilesForFeeds(doomed)
+        }
         if (remoteIds.isEmpty()) {
             feedDao.deleteAll()
         } else {
@@ -79,6 +86,17 @@ class FeedRepository(
     // Deletes a feed from the local DB. The server-side delete is expected to have
     // been triggered separately (via a web UI action); this just reflects it locally.
     suspend fun deleteFeed(feedId: Int) {
+        releaseFilesForFeeds(listOf(feedId))
         feedDao.deleteById(feedId)
+    }
+
+    private suspend fun releaseFilesForFeeds(feedIds: List<Int>) {
+        val db = com.castcharm.android.data.db.AppDatabase.getDatabase(CastCharmApp.instance)
+        val eps = db.episodeDao().getEpisodesWithFilesForFeeds(feedIds)
+        val scheduler = com.castcharm.android.download.DownloadScheduler(CastCharmApp.instance)
+        for (ep in eps) {
+            runCatching { scheduler.cancelDownload(ep.id) }
+            ep.local_path?.let { runCatching { java.io.File(it).delete() } }
+        }
     }
 }

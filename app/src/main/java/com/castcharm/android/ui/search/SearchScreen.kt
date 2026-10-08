@@ -46,8 +46,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.models.EpisodeOut
 import com.castcharm.android.data.api.models.parseServerDateTime
+import com.castcharm.android.data.db.AppDatabase
+import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.formatDate
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -62,34 +68,122 @@ class SearchViewModel : ViewModel() {
         val query: String = "",
         val results: List<EpisodeOut> = emptyList(),
         val isPending: Boolean = false,
+        val isLocalFallback: Boolean = false,
         val error: String? = null
     )
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    private val db by lazy { AppDatabase.getDatabase(CastCharmApp.instance) }
     private var searchJob: Job? = null
 
     fun setQuery(q: String) {
         searchJob?.cancel()
         if (q.isBlank()) {
-            _uiState.update { it.copy(query = q, results = emptyList(), isPending = false, error = null) }
+            _uiState.update {
+                it.copy(
+                    query = q,
+                    results = emptyList(),
+                    isPending = false,
+                    isLocalFallback = false,
+                    error = null,
+                )
+            }
             return
         }
         // Mark pending immediately so the UI reacts to the keypress, not the API response
         _uiState.update { it.copy(query = q, isPending = true, error = null) }
         searchJob = viewModelScope.launch {
             delay(400)
-            try {
-                val results = CastCharmApp.apiClient.getApi().getAllEpisodes(search = q, limit = 40)
-                _uiState.update { it.copy(results = results, isPending = false) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                _uiState.update { it.copy(isPending = false, error = "Search failed — try again") }
+            val offline = CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized
+            if (!offline) {
+                try {
+                    val results = CastCharmApp.apiClient.getApi()
+                        .getAllEpisodes(search = q, limit = 40)
+                    _uiState.update {
+                        it.copy(
+                            results = results,
+                            isPending = false,
+                            isLocalFallback = false,
+                        )
+                    }
+                    return@launch
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Fall through to local search rather than surfacing a
+                    // failure — a stale local hit is more useful than nothing.
+                }
+            }
+            runLocalSearch(q)
+        }
+    }
+
+    private suspend fun runLocalSearch(q: String) {
+        try {
+            val term = "%${q.trim()}%"
+            val feedTitleById = db.feedDao().getFeedOnceAll().associate { it.id to it.title }
+            val local = db.episodeDao().searchEpisodesLocal(term = term, limit = 40)
+            _uiState.update {
+                it.copy(
+                    results = local.map { entity -> entity.toEpisodeOut(feedTitleById[entity.feed_id]) },
+                    isPending = false,
+                    isLocalFallback = true,
+                    error = null,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _uiState.update {
+                it.copy(
+                    isPending = false,
+                    error = "Search failed — try again",
+                )
             }
         }
     }
+}
+
+// Renders a local EpisodeEntity as an EpisodeOut for the shared search row.
+// Only the fields the row actually reads are populated meaningfully; the rest
+// use safe defaults so a partial local row still renders cleanly.
+private val serverDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+    timeZone = TimeZone.getTimeZone("UTC")
+}
+
+private fun EpisodeEntity.toEpisodeOut(feedTitle: String?): EpisodeOut {
+    return EpisodeOut(
+        id = id,
+        feed_id = feed_id,
+        guid = guid,
+        title = title,
+        enclosure_url = enclosure_url,
+        enclosure_type = enclosure_type,
+        enclosure_length = enclosure_length,
+        published_at = published_at?.let { serverDateFormat.format(Date(it)) },
+        description = description,
+        duration = duration?.toString(),
+        episode_number = episode_number,
+        season_number = season_number,
+        episode_image_url = episode_image_url,
+        custom_image_url = custom_image_url,
+        author = author,
+        link = link,
+        hidden = hidden,
+        played = played,
+        play_position_seconds = play_position_seconds,
+        last_played_at = last_played_at?.let { serverDateFormat.format(Date(it)) },
+        status = if (local_path != null) "downloaded" else status,
+        file_path = null,
+        file_size = null,
+        download_progress = download_progress,
+        seq_number = seq_number,
+        created_at = serverDateFormat.format(Date(created_at)),
+        feed_image_url = feed_image_url,
+        feed_title = feedTitle,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -148,16 +242,27 @@ fun SearchScreen(
             when {
                 uiState.results.isNotEmpty() -> {
                     // Keep results visible even while a new query is pending
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 4.dp)
-                    ) {
-                        items(uiState.results, key = { it.id }) { ep ->
-                            SearchResultRow(
-                                episode = ep,
-                                onClick = { onNavigateToEpisode(ep.feed_id, ep.id) }
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (uiState.isLocalFallback) {
+                            Text(
+                                text = "Showing offline results from episodes already on this device.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                             )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 4.dp)
+                        ) {
+                            items(uiState.results, key = { it.id }) { ep ->
+                                SearchResultRow(
+                                    episode = ep,
+                                    onClick = { onNavigateToEpisode(ep.feed_id, ep.id) }
+                                )
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
                         }
                     }
                 }

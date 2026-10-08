@@ -101,6 +101,12 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         // Warm the API-key cache so interceptors on background threads read a
         // plain field instead of falling back to a blocking DataStore read.
         CoroutineScope(Dispatchers.IO).launch { AuthStore.load(this@CastCharmApp) }
+        // Downloads that were waiting when the process died only resume when
+        // something calls kickQueue(); do it here so they don't wait for a tap.
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { com.castcharm.android.download.StorageManager(this@CastCharmApp).sweepPartFiles() }
+            runCatching { com.castcharm.android.download.DownloadScheduler(this@CastCharmApp).kickQueue() }
+        }
         // Build the Coil ImageLoader with an AuthAwareCallFactory so all image
         // requests (artwork, feed covers) go through the authenticated OkHttpClient.
         // crossfade(200) applies a short fade-in transition when images load.
@@ -108,6 +114,9 @@ class CastCharmApp : Application(), ImageLoaderFactory {
             .crossfade(200)
             .callFactory(AuthAwareCallFactory(apiClient))
             .build()
+        // Register notification channels once at process start. Cheap no-op on
+        // subsequent boots because the system tracks channel identity.
+        com.castcharm.android.notifications.NewEpisodesNotifier.ensureChannel(this)
     }
 
     override fun onTerminate() {

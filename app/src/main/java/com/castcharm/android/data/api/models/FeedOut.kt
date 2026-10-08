@@ -30,4 +30,25 @@ data class FeedOut(
     val downloaded_count: Int = 0,
     val created_at: String,
     val updated_at: String,
+    // 'newest' (ordinary podcast) or 'oldest' (listen in order — a story/serial).
+    val play_order: String? = null,
+    // What "Continue" would play; only present for play_order == "oldest".
+    val next_up: NextUpOut? = null,
 )
+
+data class NextUpOut(
+    val episode_id: Int,
+    val seq_number: Int? = null,
+    val title: String? = null,
+    val position_seconds: Int = 0,
+    val resume: Boolean = false,
+)
+
+// Body for PUT api/feeds/{id}. Moshi omits nulls, so only the fields set here
+// reach the server (which applies exclude_unset semantics).
+data class FeedUpdateRequest(
+    val play_order: String? = null,
+)
+
+// Body for POST api/episodes/{id}/played — sets the state instead of toggling.
+data class PlayedRequest(val played: Boolean)

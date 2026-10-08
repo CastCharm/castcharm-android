@@ -29,5 +29,9 @@ data class FeedEntity(
     val downloaded_count: Int = 0,
     // Local-only preference — not synced to server. null means no preference set yet
     // (falls back to 1.0× at playback time). Written by PlayerViewModel on speed change.
-    val playback_speed: Float? = null
-)
+    val playback_speed: Float? = null,
+    // Synced from the server: "oldest" = listen in order (story/serial), else newest first.
+    val play_order: String? = null
+) {
+    val listenInOrder: Boolean get() = play_order == "oldest"
+}

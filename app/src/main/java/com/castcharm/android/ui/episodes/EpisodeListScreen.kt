@@ -17,6 +17,7 @@ package com.castcharm.android.ui.episodes
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -36,19 +38,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +67,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -89,6 +98,18 @@ import com.castcharm.android.ui.shared_components.OfflineModePanel
 import com.castcharm.android.ui.shared_components.PlaceholderArtwork
 import com.castcharm.android.ui.shared_components.ReconnectIconButton
 import com.castcharm.android.ui.shared_components.stripHtml
+
+// Client-side visibility filter applied to the loaded episode list. The list of
+// episodes itself is not re-fetched — filtering just narrows what the LazyColumn
+// renders. The selection is intentionally not persisted across visits: episode
+// screens are visited transiently and a "sticky" filter is more surprising than
+// helpful.
+private enum class EpisodeFilter(val label: String) {
+    ALL("All"),
+    UNPLAYED("Unplayed"),
+    DOWNLOADED("Downloaded"),
+    IN_PROGRESS("In progress"),
+}
 
 @Composable
 fun EpisodeListScreen(
@@ -144,7 +165,33 @@ fun EpisodeListScreen(
     }
     val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
     var showDownloadConfirm by remember { mutableStateOf(false) }
+    var showDeleteDownloadsConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf(EpisodeFilter.ALL) }
+
+    // Reset the filter when the user exits selection mode — a cleared batch
+    // should feel like a fresh view.
+    LaunchedEffect(isSelectionMode) {
+        if (isSelectionMode && filter != EpisodeFilter.ALL) filter = EpisodeFilter.ALL
+    }
+
+    val visibleEpisodes = remember(uiState.episodes, filter) {
+        when (filter) {
+            EpisodeFilter.ALL -> uiState.episodes
+            EpisodeFilter.UNPLAYED -> uiState.episodes.filter { !it.played }
+            EpisodeFilter.DOWNLOADED -> uiState.episodes.filter { it.local_path != null }
+            EpisodeFilter.IN_PROGRESS -> uiState.episodes.filter {
+                !it.played && it.play_position_seconds > 0
+            }
+        }
+    }
+
+    // Enable the batch-delete action only if at least one selected episode
+    // actually has a file on disk to remove.
+    val anySelectedDownloaded = remember(uiState.selectedEpisodes, uiState.episodes) {
+        val selected = uiState.selectedEpisodes
+        uiState.episodes.any { it.id in selected && it.local_path != null }
+    }
 
     if (showDownloadConfirm) {
         AlertDialog(
@@ -163,6 +210,35 @@ fun EpisodeListScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showDownloadConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showDeleteDownloadsConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDownloadsConfirm = false },
+            title = { Text("Delete downloads?") },
+            text = {
+                Text(
+                    "Remove the downloaded audio for the selected episodes from this " +
+                        "device. They'll remain available for streaming."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteSelectedDownloads()
+                        showDeleteDownloadsConfirm = false
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDownloadsConfirm = false }) {
                     Text("Cancel")
                 }
             }
@@ -205,8 +281,38 @@ fun EpisodeListScreen(
                 actions = {
                     when {
                         isSelectionMode -> {
+                            // Whether "mark played" or "mark unplayed" is the primary
+                            // action depends on the majority state of the selection —
+                            // showing whichever change would affect the most rows.
+                            val allSelectedPlayed = uiState.selectedEpisodes.isNotEmpty() &&
+                                uiState.episodes.filter { it.id in uiState.selectedEpisodes }
+                                    .all { it.played }
                             TextButton(onClick = { viewModel.selectAll() }) {
                                 Text("All")
+                            }
+                            IconButton(
+                                onClick = { viewModel.markSelectedPlayed(!allSelectedPlayed) },
+                            ) {
+                                if (allSelectedPlayed) {
+                                    Icon(
+                                        Icons.Default.RadioButtonUnchecked,
+                                        contentDescription = "Mark unplayed",
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Default.CheckCircle,
+                                        contentDescription = "Mark played",
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { showDeleteDownloadsConfirm = true },
+                                enabled = anySelectedDownloaded,
+                            ) {
+                                Icon(
+                                    Icons.Default.DeleteForever,
+                                    contentDescription = "Delete downloads",
+                                )
                             }
                             IconButton(onClick = { showDownloadConfirm = true }) {
                                 Icon(Icons.Default.PhoneAndroid, contentDescription = "Download to phone")
@@ -251,6 +357,18 @@ fun EpisodeListScreen(
                                     enabled = !uiState.isSyncing && !uiState.isRefreshing,
                                     onClick = { showMenu = false; viewModel.syncFeed() }
                                 )
+                                // Mirrors the web setting. One row, checkmark when on.
+                                val inOrder = feed?.listenInOrder == true
+                                DropdownMenuItem(
+                                    text = { Text("Listen in chronological order") },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (inOrder) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                            contentDescription = null
+                                        )
+                                    },
+                                    onClick = { showMenu = false; viewModel.setListenInOrder(!inOrder) }
+                                )
                             }
                         }
                     }
@@ -270,13 +388,20 @@ fun EpisodeListScreen(
             return@Scaffold
         }
 
+        PullToRefreshBox(
+            isRefreshing = uiState.isSyncing,
+            onRefresh = { viewModel.syncFeed() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = padding.calculateTopPadding()),
+        ) {
         when {
             uiState.isInitialLoading && uiState.episodes.isEmpty() -> {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 8.dp,
-                        top = 4.dp + padding.calculateTopPadding(),
+                        top = 4.dp,
                         end = 8.dp,
                         bottom = 4.dp
                     ),
@@ -288,7 +413,7 @@ fun EpisodeListScreen(
             }
 
             uiState.episodes.isEmpty() -> {
-                EmptyEpisodeScreen(modifier = Modifier.padding(top = padding.calculateTopPadding()))
+                EmptyEpisodeScreen(modifier = Modifier)
             }
 
             else -> {
@@ -297,7 +422,7 @@ fun EpisodeListScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 8.dp,
-                        top = 4.dp + padding.calculateTopPadding(),
+                        top = 4.dp,
                         end = 8.dp,
                         bottom = 4.dp
                     )
@@ -313,12 +438,35 @@ fun EpisodeListScreen(
                                 unplayedCount = feed.unplayed_count,
                                 onPlayFeed = if (!isOfflineMode && feed.unplayed_count > 0) {
                                     { viewModel.playFeed { episodeId -> onPlayEpisode(episodeId) } }
-                                } else null
+                                } else null,
+                                playLabel = when {
+                                    !feed.listenInOrder -> "Play latest"
+                                    uiState.nextUp != null -> "Continue"
+                                    else -> "All caught up"
+                                },
+                                nextUpLine = if (feed.listenInOrder) uiState.nextUp?.line else null
                             )
                         }
                     }
 
-                    items(uiState.episodes, key = { it.id }) { episode ->
+                    // Filter chips: shown once the feed has any episodes and
+                    // hidden in selection mode to keep the batch context clean.
+                    if (!isSelectionMode) {
+                        item {
+                            EpisodeFilterChips(
+                                selected = filter,
+                                onSelect = { filter = it },
+                            )
+                        }
+                    }
+
+                    if (visibleEpisodes.isEmpty()) {
+                        item {
+                            EmptyFilterState(filter = filter, onClear = { filter = EpisodeFilter.ALL })
+                        }
+                    }
+
+                    items(visibleEpisodes, key = { it.id }) { episode ->
                         val isSelected = episode.id in uiState.selectedEpisodes
                         val isPhoneDownloadInProgress = episode.id in uiState.activePhoneDownloadEpisodeIds
 
@@ -382,6 +530,7 @@ fun EpisodeListScreen(
                 }
             }
         }
+        }
     }
 
     addToPlaylistSheetEpisodeId?.let { epId ->
@@ -432,7 +581,9 @@ fun FeedHeader(
     imageUrl: String?,
     episodeCount: Int,
     unplayedCount: Int,
-    onPlayFeed: (() -> Unit)? = null
+    onPlayFeed: (() -> Unit)? = null,
+    playLabel: String = "Play Feed",
+    nextUpLine: String? = null
 ) {
     var descriptionExpanded by remember { mutableStateOf(false) }
 
@@ -475,8 +626,18 @@ fun FeedHeader(
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Play Feed", style = MaterialTheme.typography.labelMedium)
+                        Text(playLabel, style = MaterialTheme.typography.labelMedium)
                     }
+                }
+                if (nextUpLine != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = nextUpLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                 if (feedDescription != null) {
                     val plainText = remember(feedDescription) { stripHtml(feedDescription) }
@@ -548,6 +709,48 @@ private fun FeedHeaderSkeleton() {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun EpisodeFilterChips(
+    selected: EpisodeFilter,
+    onSelect: (EpisodeFilter) -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .horizontalScroll(scrollState),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        EpisodeFilter.values().forEach { option ->
+            FilterChip(
+                selected = option == selected,
+                onClick = { onSelect(option) },
+                label = { Text(option.label) },
+                colors = FilterChipDefaults.filterChipColors(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyFilterState(filter: EpisodeFilter, onClear: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "Nothing to show for \"${filter.label}\".",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = onClear) { Text("Show all episodes") }
     }
 }
 

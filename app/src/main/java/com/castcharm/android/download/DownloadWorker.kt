@@ -31,6 +31,7 @@ import com.castcharm.android.data.api.PersistentCookieJar
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.dataStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -185,7 +186,7 @@ class DownloadWorker(
             val storageManager = StorageManager(applicationContext)
             val estimatedSize = episode.enclosure_length ?: 0L
             if (!storageManager.canDownload(estimatedSize)) {
-                storageManager.enforceQuota()
+                storageManager.enforceQuota(neededBytes = estimatedSize)
                 if (!storageManager.canDownload(estimatedSize)) {
                     if (ownsRow()) {
                         db.withTransaction {
@@ -225,8 +226,11 @@ class DownloadWorker(
             // getDownloadPath() prefixes the filename with episodeId_ to guarantee
             // uniqueness even when two episodes have the same title.
             val downloadFile = storageManager.getDownloadPath(episodeId, "$safeTitle.$extension")
-            // Track the partial file so it can be deleted if we fail mid-stream.
-            partialFile = downloadFile
+            // Stream into a worker-specific temp file and rename on completion,
+            // so a cancelled or crashed download never leaves a truncated file
+            // under the final name (which a later scan would mistake for complete).
+            val tempFile = File(downloadFile.parentFile, downloadFile.name + ".$myWorkId.part")
+            partialFile = tempFile
 
             // Final ownership check before we start writing — avoids beginning
             // a potentially large download if we've already been superseded.
@@ -259,7 +263,7 @@ class DownloadWorker(
             // the read deadline — without this, a large file or slow connection
             // would time out mid-stream after the default 10s idle window.
             val client = OkHttpClient.Builder()
-                .cookieJar(PersistentCookieJar(applicationContext))
+                .cookieJar(PersistentCookieJar.getInstance(applicationContext))
                 .addInterceptor(ApiKeyInterceptor(applicationContext))
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -296,7 +300,7 @@ class DownloadWorker(
 
             // Streaming copy loop. 64 KB buffer balances memory use and I/O calls.
             body.byteStream().use { input ->
-                downloadFile.outputStream().use { output ->
+                tempFile.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
                     var bytesCopied = 0L
 
@@ -366,18 +370,28 @@ class DownloadWorker(
             // Final ownership check after the stream closes but before committing.
             if (!ownsRow()) return@withContext Result.failure()
 
+            if (downloadFile.exists()) downloadFile.delete()
+            if (!tempFile.renameTo(downloadFile)) {
+                throw java.io.IOException("Could not move finished download into place")
+            }
+
             // Atomic completion: write local_path + size and delete the download
             // row in a single transaction. This prevents any window where the
             // episode shows as "downloaded" but the queue row still exists (or
             // vice versa), which would confuse kickQueue() on the next cycle.
+            val finalSize = downloadFile.length()
             db.withTransaction {
                 episodeDao.updateDownloadComplete(
                     episodeId = episodeId,
                     localPath = downloadFile.absolutePath,
-                    localSizeBytes = downloadFile.length()
+                    localSizeBytes = finalSize
                 )
                 downloadDao.deleteByEpisodeId(episodeId)
             }
+            // Record for the "downloaded this month" indicator on the
+            // Downloads screen. Kept out of the transaction so a DataStore
+            // hiccup can't roll back the completed download.
+            BandwidthTracker.record(applicationContext, finalSize)
 
             completedSuccessfully = true
             // Clear partialFile so the catch blocks don't attempt to delete
@@ -414,6 +428,16 @@ class DownloadWorker(
             // up to MAX_DOWNLOAD_ATTEMPTS; permanently fail after that.
             e.printStackTrace()
             if (completedSuccessfully) Result.success() else retryOrFail(deletePartial = true)
+        } finally {
+            // The temp file is ours alone (named with this worker's id), so it is
+            // always safe to remove — and this must run even when the coroutine
+            // was cancelled, which is exactly when the catch blocks above cannot
+            // reach their suspend calls.
+            if (!completedSuccessfully) {
+                withContext(NonCancellable) {
+                    partialFile?.let { runCatching { if (it.exists()) it.delete() } }
+                }
+            }
         }
     }
 }

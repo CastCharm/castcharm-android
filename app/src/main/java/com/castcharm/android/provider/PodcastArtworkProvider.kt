@@ -63,7 +63,7 @@ class PodcastArtworkProvider : ContentProvider() {
                     ?: if (baseUrl.isNotEmpty()) "${baseUrl}api/feeds/${feedId}/cover.jpg" else null
                 if (url != null) {
                     val client = OkHttpClient.Builder()
-                        .cookieJar(PersistentCookieJar(context))
+                        .cookieJar(PersistentCookieJar.getInstance(context))
                         .addInterceptor(ApiKeyInterceptor(context))
                         .connectTimeout(15, TimeUnit.SECONDS)
                         .readTimeout(30, TimeUnit.SECONDS)
@@ -105,7 +105,7 @@ class PodcastArtworkProvider : ContentProvider() {
     // A ContentProvider is created before Application.onCreate(), so AuthStore's
     // cache may still be cold here; ApiKeyInterceptor loads it on first use.
     private val httpClient by lazy {
-        val cookieJar = PersistentCookieJar(context!!)
+        val cookieJar = PersistentCookieJar.getInstance(context!!)
         OkHttpClient.Builder()
             .cookieJar(cookieJar)
             .addInterceptor(ApiKeyInterceptor(context!!))

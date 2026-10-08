@@ -62,8 +62,12 @@ import com.castcharm.android.AppAuthState
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.MainActivity
 import com.castcharm.android.R
+import com.castcharm.android.SKIP_SILENCE_KEY
 import com.castcharm.android.data.api.ApiKeyInterceptor
+import com.castcharm.android.data.api.models.PlayedRequest
+import com.castcharm.android.data.api.models.PlayerPlayRequest
 import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.repository.FeedRepository
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.dao.EpisodeDao
 import com.castcharm.android.data.db.dao.FeedDao
@@ -81,6 +85,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -92,9 +98,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
@@ -111,6 +114,11 @@ private const val SECTION_CONTINUE = "section_continue"
 private const val SECTION_RECENT = "section_recent"
 private const val SECTION_PODCASTS = "section_podcasts"
 private const val SECTION_DOWNLOADS = "section_downloads"
+// "Continue" row at the top of a listen-in-order feed; expands to that feed's queue.
+private const val CATCHUP_PREFIX = "catchup_feed_"
+// How many episodes to put in the player's timeline after the one that starts.
+// Enough to listen for hours; small enough that artwork and resolution stay cheap.
+private const val IN_ORDER_QUEUE_LIMIT = 25
 // Suffix appended to packageName to form the authority of PodcastArtworkProvider.
 // Must match the authority declared in AndroidManifest.xml.
 private const val ARTWORK_AUTHORITY_SUFFIX = ".artwork"
@@ -318,6 +326,15 @@ class PlayerService : MediaLibraryService() {
     private var libraryRefreshJob: Job? = null
     @Volatile
     private var latestPlaybackSpeed: Float = 1.0f
+    // The server's auto-played threshold (fraction). Fetched once; the
+    // constant is only the fallback for a server that can't be asked.
+    @Volatile
+    private var playedThresholdPct: Float = PLAYED_THRESHOLD_PCT
+    // When the player last moved to another item. The progress loop holds off
+    // writing a near-zero position right after a transition, so the saved
+    // position of the new item is still there for the resume seek.
+    @Volatile
+    private var lastTransitionMs: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -327,6 +344,10 @@ class PlayerService : MediaLibraryService() {
             // the first playback request or browse query arrives.
             serviceScope.launch {
                 ensureApiClientInitializedFromStorage(this@PlayerService)
+                if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
+                    runCatching { CastCharmApp.apiClient.getApi().getSettings().auto_played_threshold }
+                        .onSuccess { if (it in 50..100) playedThresholdPct = it / 100f }
+                }
             }
 
             // Build a dedicated OkHttpClient for streaming. The interceptor calls
@@ -335,22 +356,12 @@ class PlayerService : MediaLibraryService() {
             // readTimeout(0) disables the read deadline — required for streaming
             // large audio files without a mid-stream timeout.
             //
-            // We delegate cookie reads to ApiClient's live cookie jar rather than
-            // using a separate PersistentCookieJar. A separate jar would only load
-            // cookies from disk once at service creation time, so it would be stale
-            // if login happened after the service started — causing 401 errors when
-            // streaming. The application interceptor below guarantees ApiClient is
-            // initialized before OkHttp's BridgeInterceptor calls loadForRequest().
-            val streamingCookieJar = object : CookieJar {
-                override fun loadForRequest(url: HttpUrl): List<Cookie> =
-                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.loadForRequest(url) ?: emptyList()
-
-                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                    CastCharmApp.apiClient.getHttpClient()?.cookieJar?.saveFromResponse(url, cookies)
-                }
-            }
+            // Uses the process-wide PersistentCookieJar singleton so the same
+            // in-memory cookie map is shared with ApiClient. A login that
+            // completes after this service starts is visible to the very next
+            // streaming request with no reload required.
             val streamingClient = OkHttpClient.Builder()
-                .cookieJar(streamingCookieJar)
+                .cookieJar(com.castcharm.android.data.api.PersistentCookieJar.getInstance(this@PlayerService))
                 .addInterceptor(ApiKeyInterceptor(this@PlayerService))
                 .addInterceptor { chain ->
                     ensureApiClientInitializedBlocking(this@PlayerService)
@@ -402,6 +413,20 @@ class PlayerService : MediaLibraryService() {
                 .build()
             Log.d(TAG, "ExoPlayer built OK")
 
+            // Apply the current skip-silence preference to the freshly-built
+            // player, then keep it in sync as the user toggles the setting.
+            serviceScope.launch {
+                this@PlayerService.dataStore.data
+                    .map { it[SKIP_SILENCE_KEY] ?: false }
+                    .collectLatest { enabled ->
+                        withContext(Dispatchers.Main) {
+                            if (::player.isInitialized) {
+                                player.skipSilenceEnabled = enabled
+                            }
+                        }
+                    }
+            }
+
             latestPlaybackSpeed = player.playbackParameters.speed
 
             val callback = PlayerLibrarySessionCallback(
@@ -410,7 +435,14 @@ class PlayerService : MediaLibraryService() {
                 episodeDao = db.episodeDao(),
                 player = player,
                 scope = serviceScope,
-                sessionProvider = { mediaSession }
+                sessionProvider = { mediaSession },
+                // Fired from onGetLibraryRoot so the head-unit browse tree
+                // always kicks a fresh server pull. Debounced inside
+                // refreshFromServerForBrowse so repeated browses in the same
+                // session don't cause a request storm.
+                onBrowseRoot = {
+                    serviceScope.launch { refreshFromServerForBrowse("browse_root") }
+                },
             )
             callback.updateLatestPlaybackSpeed(latestPlaybackSpeed)
 
@@ -425,11 +457,62 @@ class PlayerService : MediaLibraryService() {
                 // don't need an extra DB round-trip here. The guard prevents a spurious
                 // onPlaybackParametersChanged (and its metadata refresh) when speed is unchanged.
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    val feedSpeed = mediaItem?.mediaMetadata?.extras
-                        ?.getFloat("castcharm_feed_speed", 1f) ?: 1f
-                    if (player.playbackParameters.speed != feedSpeed) {
-                        player.setPlaybackParameters(PlaybackParameters(feedSpeed))
+                    lastTransitionMs = System.currentTimeMillis()
+                    val transitionedId = mediaItem?.mediaId
+                    val epId = transitionedId?.removePrefix("episode_")?.toIntOrNull()
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                        // Fresh set: the speed baked into the item at resolve time
+                        // is current, and the start position was chosen already.
+                        val feedSpeed = mediaItem?.mediaMetadata?.extras
+                            ?.getFloat("castcharm_feed_speed", 1f) ?: 1f
+                        if (player.playbackParameters.speed != feedSpeed) {
+                            player.setPlaybackParameters(PlaybackParameters(feedSpeed))
+                        }
+                        return
                     }
+                    // A move within the queue (AUTO / SEEK / REPEAT).
+                    if (epId == null) return
+                    serviceScope.launch {
+                        val ep = db.episodeDao().getEpisodeOnce(epId) ?: return@launch
+                        // Speed: the feed row is what the user last chose (both the
+                        // phone and the car write it there), not the value baked
+                        // into the item when the queue was built.
+                        val feedSpeed = db.feedDao().getFeedOnce(ep.feed_id)?.playback_speed ?: 1f
+                        val resumeMs = if (!ep.played && ep.play_position_seconds > 0)
+                            maxOf(0L, ep.play_position_seconds * 1000L - 5000L) else -1L
+                        withContext(Dispatchers.Main) {
+                            if (player.currentMediaItem?.mediaId != transitionedId) return@withContext
+                            if (player.playbackParameters.speed != feedSpeed) {
+                                player.setPlaybackParameters(PlaybackParameters(feedSpeed))
+                            }
+                            if (resumeMs >= 0) player.seekTo(resumeMs)
+                        }
+                        // Android Auto's player screen wants embedded artwork for
+                        // the item that is playing; queued items carry only a URI.
+                        embedArtworkForCurrent(ep, transitionedId)
+                        // Keep the server's pointer on this episode so Next/Previous
+                        // elsewhere, and a later "Continue", start from here.
+                        callback.activeContext?.let { ctx ->
+                            if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
+                                runCatching {
+                                    CastCharmApp.apiClient.getApi().updatePlayerState(ctx.copy(episode_id = epId))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ExoPlayer reports STATE_ENDED only when the whole timeline ends.
+                // An item that finished and rolled into the next one shows up here
+                // instead, so this is where queued episodes get marked played.
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int
+                ) {
+                    if (reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) return
+                    val finishedId = oldPosition.mediaItem?.mediaId?.removePrefix("episode_")?.toIntOrNull() ?: return
+                    serviceScope.launch { markPlayed(finishedId) }
                 }
 
                 // When the episode finishes naturally, mark it played immediately
@@ -508,9 +591,85 @@ class PlayerService : MediaLibraryService() {
             // Start the polling loop that detects DB content changes and pushes
             // notifyChildrenChanged() updates to Android Auto.
             startLibraryRefreshObserver()
+
+            // Warm the local DB from the server on service startup. Covers the
+            // common Android Auto scenario: the app hasn't been touched in days,
+            // the process was killed, the user plugs into the car and expects
+            // to see current episodes. Without this the head unit reads stale
+            // rows and only refreshes once the phone app is reopened.
+            serviceScope.launch { refreshFromServerForBrowse("service_create") }
         } catch (e: Exception) {
             Log.e(TAG, "PlayerService.onCreate FAILED — session will be null", e)
         }
+    }
+
+    // Timestamp of the last successful (or attempted) server refresh triggered
+    // by an Android Auto browse. Guards refreshFromServerForBrowse() so multiple
+    // browse requests in quick succession don't hammer the server. The user
+    // won't notice a 30-second staleness while they're still opening the browse
+    // tree, but they will notice if we make the app hang on every screen.
+    @Volatile
+    private var lastBrowseRefreshMs: Long = 0L
+    private val browseRefreshMinIntervalMs: Long = 30_000L
+
+    /**
+     * Pull feeds, continue-listening, and recent-episodes down from the server
+     * into the local DB. Called on service create and on each library-root
+     * browse from Android Auto — the two moments when a cold app is about to
+     * show stale content to the user via the head unit.
+     *
+     * Once the DB is updated, the existing snapshot poller in
+     * startLibraryRefreshObserver() sees the change and calls
+     * notifyChildrenChanged, so Android Auto re-reads and shows the fresh data
+     * without any extra plumbing here.
+     */
+    private suspend fun refreshFromServerForBrowse(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastBrowseRefreshMs < browseRefreshMinIntervalMs) {
+            Log.d(TAG, "AA browse refresh skipped (last ran ${now - lastBrowseRefreshMs}ms ago, reason=$reason)")
+            return
+        }
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) {
+            Log.d(TAG, "AA browse refresh skipped (offline/uninitialised, reason=$reason)")
+            return
+        }
+        lastBrowseRefreshMs = now
+        Log.d(TAG, "AA browse refresh starting (reason=$reason)")
+
+        val api = CastCharmApp.apiClient.getApi()
+        val feedRepo = FeedRepository(api, db.feedDao())
+        val episodeRepo = EpisodeRepository(api, db.episodeDao())
+
+        // Feeds first — subsequent per-feed data depends on knowing which
+        // feeds exist. Each step is isolated in a runCatching so one failure
+        // doesn't stop the others; partial freshness is better than no freshness.
+        runCatching { feedRepo.refreshFeeds() }
+            .onFailure { Log.w(TAG, "AA browse refresh: feeds failed", it) }
+
+        runCatching { episodeRepo.fetchAndCacheContinueListening() }
+            .onFailure { Log.w(TAG, "AA browse refresh: continue-listening failed", it) }
+
+        // Recent episodes across every feed. mergeFromApi preserves phone-only
+        // fields (local_path, download progress, pending-sync flags) so this
+        // never clobbers a download in flight.
+        runCatching {
+            val recent = api.getAllEpisodes(limit = 100, offset = 0, order = "desc")
+            val phoneDownloadIds = db.downloadDao().getAllDownloadsOnceOrdered()
+                .map { it.episode_id }
+                .toSet()
+            val entities = recent.map { remote ->
+                remote.toEntity(
+                    existing = db.episodeDao().getEpisodeOnce(remote.id),
+                    hasActivePhoneDownload = remote.id in phoneDownloadIds,
+                )
+            }
+            db.episodeDao().mergeFromApi(
+                episodes = entities,
+                activePhoneDownloadEpisodeIds = phoneDownloadIds.intersect(recent.map { it.id }.toSet()),
+            )
+        }.onFailure { Log.w(TAG, "AA browse refresh: recent episodes failed", it) }
+
+        Log.d(TAG, "AA browse refresh completed (reason=$reason)")
     }
 
     // Polls the DB every 1.5 seconds to detect content changes (new episodes
@@ -610,6 +769,9 @@ class PlayerService : MediaLibraryService() {
     //
     // Also checks the played threshold on each sync cycle so auto-mark-played
     // works even if the user pauses right at 98% and never hits STATE_ENDED.
+    @Volatile
+    private var lastContinueNotifyMs: Long = 0L
+
     private fun startProgressTracking() {
         progressJob?.cancel()
         progressJob = serviceScope.launch {
@@ -626,17 +788,25 @@ class PlayerService : MediaLibraryService() {
                 val durationSeconds = durationMs.takeIf { it > 0L }?.div(1000L)?.toInt()
                 val now = System.currentTimeMillis()
 
+                // Right after a transition the position is ~0 while the resume
+                // seek is still being looked up; writing it would erase the
+                // saved position the seek is about to use.
+                if (positionSeconds < 2 && now - lastTransitionMs < 3_000L) continue
+
                 // 10-second server sync gate — save battery and server load.
                 if (now - lastSyncMs >= 10_000L) {
                     try {
                         val existing = db.episodeDao().getEpisodeOnce(episodeId)
-                        val targetPlayed = EpisodeRepository.derivePlayedState(
+                        // This loop only ever promotes unplayed → played. Un-marking
+                        // is a deliberate user action (and resets the position to 0),
+                        // never something to infer from a scrub backwards.
+                        val targetPlayed = (existing?.played == true) || EpisodeRepository.derivePlayedState(
                             positionSeconds = positionSeconds,
                             // durationSeconds from the live player is more accurate than
                             // the cached DB value (which may be from RSS metadata).
                             durationSeconds = durationSeconds ?: existing?.duration,
-                            currentPlayed = existing?.played ?: false,
-                            thresholdPct = PLAYED_THRESHOLD_PCT
+                            currentPlayed = false,
+                            thresholdPct = playedThresholdPct
                         )
 
                         // Write progress to DB. pending flag is true only if we can't
@@ -656,7 +826,7 @@ class PlayerService : MediaLibraryService() {
                         // Auto-mark played if the threshold was crossed mid-playback.
                         if (existing != null && existing.played != targetPlayed) {
                             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
-                                CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
+                                CastCharmApp.apiClient.getApi().setPlayed(episodeId, PlayedRequest(targetPlayed))
                                 db.episodeDao().updatePlayedStatus(episodeId, targetPlayed, now, pending = false)
                             } else {
                                 db.episodeDao().updatePlayedStatus(episodeId, targetPlayed, now, pending = true)
@@ -664,18 +834,24 @@ class PlayerService : MediaLibraryService() {
                         }
 
                         lastSyncMs = now
-                        // Notify Android Auto so the "Continue Listening" list updates
-                        // to reflect the new position/played state.
-                        notifyBrowseSectionsChanged(episodeId)
+                        // Android Auto re-reads every section it is told about, and
+                        // for a feed list that can mean a full server fetch — so
+                        // tell it only when the played state changed, or once a
+                        // minute for the "Continue" position.
+                        val playedChanged = existing != null && existing.played != targetPlayed
+                        if (playedChanged || now - lastContinueNotifyMs >= 60_000L) {
+                            lastContinueNotifyMs = now
+                            notifyBrowseSectionsChanged(episodeId)
+                        }
                     } catch (_: Exception) {
                         // Server call failed — write to DB with pending=true so
                         // SyncWorker can flush the progress on the next cycle.
                         val existing = db.episodeDao().getEpisodeOnce(episodeId)
-                        val targetPlayed = EpisodeRepository.derivePlayedState(
+                        val targetPlayed = (existing?.played == true) || EpisodeRepository.derivePlayedState(
                             positionSeconds = positionSeconds,
                             durationSeconds = durationSeconds ?: existing?.duration,
-                            currentPlayed = existing?.played ?: false,
-                            thresholdPct = PLAYED_THRESHOLD_PCT
+                            currentPlayed = false,
+                            thresholdPct = playedThresholdPct
                         )
 
                         db.episodeDao().updateProgress(episodeId, positionSeconds, now, pending = true)
@@ -688,12 +864,27 @@ class PlayerService : MediaLibraryService() {
         }
     }
 
+    // Swap embedded artwork into the item that just started playing (queued
+    // items are resolved with a URI only, to keep queue building fast).
+    private suspend fun embedArtworkForCurrent(episode: EpisodeEntity, mediaId: String?) {
+        val bytes = artworkBytesFor(this, episode) ?: return
+        withContext(Dispatchers.Main) {
+            val idx = player.currentMediaItemIndex
+            val current = player.currentMediaItem ?: return@withContext
+            if (current.mediaId != mediaId || current.mediaMetadata.artworkData != null) return@withContext
+            val md = current.mediaMetadata.buildUpon()
+                .setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                .build()
+            player.replaceMediaItem(idx, current.buildUpon().setMediaMetadata(md).build())
+        }
+    }
+
     private suspend fun markPlayed(episodeId: Int) {
         val now = System.currentTimeMillis()
         try {
             db.episodeDao().updatePlayedStatus(episodeId, true, now)
             if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
-                CastCharmApp.apiClient.getApi().togglePlayed(episodeId)
+                CastCharmApp.apiClient.getApi().setPlayed(episodeId, PlayedRequest(true))
             } else {
                 db.episodeDao().updatePlayedStatus(episodeId, true, now, pending = true)
             }
@@ -764,9 +955,19 @@ private class PlayerLibrarySessionCallback(
     private val player: Player,
     private val scope: CoroutineScope,
     private val sessionProvider: () -> MediaLibrarySession?,
+    // Invoked whenever a browser asks for the library root — the "user just
+    // opened the browse tree" signal. Used to pull fresh data from the server
+    // so the head unit doesn't render a snapshot from days ago.
+    private val onBrowseRoot: () -> Unit = {},
 ) : MediaLibraryService.MediaLibrarySession.Callback {
 
     private val connectedControllers = linkedSetOf<MediaSession.ControllerInfo>()
+
+    // The server context the current queue was built from, so the service can
+    // keep the server's pointer in step with local transitions.
+    // null = the queue is local-only (offline) or a plain single item.
+    @Volatile
+    var activeContext: PlayerPlayRequest? = null
 
     @Volatile
     private var latestPlaybackSpeed: Float = 1.0f
@@ -825,13 +1026,10 @@ private class PlayerLibrarySessionCallback(
             .add(SPEED_COMMAND)
             .build()
 
+        // Next/previous episode stay available: Media3 only enables them when
+        // the timeline actually has a neighbour, so a single episode looks as
+        // it always did while a listen-in-order queue gets skip buttons.
         val playerCommands = base.availablePlayerCommands
-            .buildUpon()
-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-            .remove(Player.COMMAND_SEEK_TO_NEXT)
-            .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-            .build()
 
         val buttons = initialMediaButtonPreferences(latestPlaybackSpeed)
 
@@ -902,6 +1100,7 @@ private class PlayerLibrarySessionCallback(
                 parentId == SECTION_RECENT -> true
                 parentId == SECTION_DOWNLOADS -> true
                 parentId == SECTION_PODCASTS -> true
+                parentId.startsWith(CATCHUP_PREFIX) -> true
                 parentId.startsWith("feed_") -> {
                     val id = parentId.removePrefix("feed_").toIntOrNull()
                     id != null && feedDao.getFeedOnce(id) != null
@@ -924,6 +1123,11 @@ private class PlayerLibrarySessionCallback(
         browser: MediaSession.ControllerInfo,
         params: MediaLibraryService.LibraryParams?
     ): ListenableFuture<LibraryResult<MediaItem>> {
+        // Fire-and-forget: fetch fresh data from the server in the background
+        // so the head unit's browse tree updates as soon as the DB does. The
+        // return path below still uses whatever's currently in the DB so this
+        // request stays fast (Android Auto has a strict timeout).
+        onBrowseRoot()
         val root = rootItem(context)
         val extras = root.mediaMetadata.extras ?: Bundle()
         extras.putInt(
@@ -951,6 +1155,13 @@ private class PlayerLibrarySessionCallback(
                 mediaId == SECTION_RECENT -> section(context, SECTION_RECENT, "Recent")
                 mediaId == SECTION_DOWNLOADS -> section(context, SECTION_DOWNLOADS, "Downloads")
                 mediaId == SECTION_PODCASTS -> section(context, SECTION_PODCASTS, "Podcasts")
+                mediaId.startsWith(CATCHUP_PREFIX) -> {
+                    val feedId = mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull()
+                        ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    val feed = feedDao.getFeedOnce(feedId)
+                        ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    createCatchUpItem(feed)
+                }
                 mediaId.startsWith("feed_") -> {
                     val feedId = mediaId.removePrefix("feed_").toIntOrNull()
                         ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
@@ -1067,9 +1278,17 @@ private class PlayerLibrarySessionCallback(
                         }
                     }
 
-                    allItems = episodeDao
-                        .getEpisodesForAndroidAutoByFeed(feedId)
-                        .map { ep -> createEpisodeItem(ep, feed.title) }
+                    allItems = if (feed.listenInOrder) {
+                        // A story reads top to bottom: oldest first, with one
+                        // "Continue" row above it that plays the whole queue.
+                        listOf(createCatchUpItem(feed)) + episodeDao
+                            .getEpisodesForAndroidAutoByFeedOldestFirst(feedId)
+                            .map { ep -> createEpisodeItem(ep, feed.title) }
+                    } else {
+                        episodeDao
+                            .getEpisodesForAndroidAutoByFeed(feedId)
+                            .map { ep -> createEpisodeItem(ep, feed.title) }
+                    }
                     resultParams = playableLibraryParams()
                 }
 
@@ -1126,9 +1345,19 @@ private class PlayerLibrarySessionCallback(
                 )
                 MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)
             } else {
-                val resolved = mediaItems.map { resolveMediaItem(it) }
+                // One episode of a feed listened to in order becomes that feed's
+                // queue from this episode onward, so the car, the headset and the
+                // phone all keep going without any UI alive to advance them.
+                val (itemsToResolve, indexToStart) =
+                    expandInOrderQueue(mediaItems, safeRequestedIndex) ?: (mediaItems to startIndex)
+                val startAt = indexToStart.coerceIn(0, itemsToResolve.lastIndex.coerceAtLeast(0))
+                val resolved = kotlinx.coroutines.coroutineScope {
+                    itemsToResolve.mapIndexed { i, it ->
+                        async { resolveMediaItem(it, embedArtwork = i == startAt) }
+                    }.awaitAll()
+                }
 
-                val safeStartIndex = startIndex.coerceIn(0, resolved.lastIndex.coerceAtLeast(0))
+                val safeStartIndex = indexToStart.coerceIn(0, resolved.lastIndex.coerceAtLeast(0))
                 val selectedItem = resolved.getOrNull(safeStartIndex)
 
                 val selectedEpisodeId = selectedItem
@@ -1179,21 +1408,178 @@ private class PlayerLibrarySessionCallback(
         mediaItems: List<MediaItem>
     ): ListenableFuture<List<MediaItem>> =
         asyncFuture(emptyList()) {
-            if (CastCharmApp.isOfflineMode) {
-                mediaItems.filter { canPlayOffline(it) }.map { resolveMediaItem(it) }
-            } else {
-                mediaItems.map { resolveMediaItem(it) }
+            val playable = if (CastCharmApp.isOfflineMode) mediaItems.filter { canPlayOffline(it) } else mediaItems
+            kotlinx.coroutines.coroutineScope {
+                playable.map { async { resolveMediaItem(it, embedArtwork = false) } }.awaitAll()
             }
         }
 
+    /**
+     * The listen-in-order rule.  Given a single `episode_<id>` of a feed with
+     * play_order == "oldest", or a `catchup_feed_<id>` row, return the queue to
+     * load and the index to start at; null means "play exactly what was asked".
+     *
+     * Online, the server decides (it owns played state and the queue); offline
+     * or on failure, the local table does.  The queue is capped after the start
+     * episode, and any queued episode the phone has not cached yet is fetched so
+     * resolveMediaItem can give it a URI.
+     */
+    private suspend fun expandInOrderQueue(items: List<MediaItem>, index: Int): Pair<List<MediaItem>, Int>? {
+        if (items.size != 1) return null
+        val original = items[0]
+        val mediaId = original.mediaId
+        val tappedId: Int?
+        val feedId: Int
+        if (mediaId.startsWith(CATCHUP_PREFIX)) {
+            tappedId = null
+            feedId = mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull() ?: return null
+        } else {
+            val epId = mediaId.removePrefix("episode_").toIntOrNull() ?: return null
+            val ep = episodeDao.getEpisodeOnce(epId) ?: return null
+            feedId = ep.feed_id
+            tappedId = epId
+        }
+        val feed = feedDao.getFeedOnce(feedId) ?: return null
+        val online = !CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized
+        if (!feed.listenInOrder) {
+            // Not an in-order feed — but the server may have just been told to
+            // play a playlist (or a feed) that starts with exactly this episode.
+            // If so, load that queue so it advances without the phone UI too.
+            return if (online && tappedId != null) expandFromServerContext(original, tappedId) else null
+        }
+
+        var ids: List<Int> = emptyList()
+        var start = 0
+        if (online) {
+            try {
+                val state = CastCharmApp.apiClient.getApi().playerPlay(
+                    PlayerPlayRequest(context_type = "feed", context_id = feedId,
+                                      episode_id = tappedId, context_filter = "unplayed")
+                )
+                activeContext = PlayerPlayRequest(context_type = "feed", context_id = feedId, context_filter = "unplayed")
+                val queueIds = state.queue.map { it.id }
+                val currentId = tappedId ?: state.current_episode?.id
+                val pos = queueIds.indexOf(currentId)
+                ids = when {
+                    currentId == null -> queueIds
+                    pos >= 0 -> queueIds
+                    else -> listOf(currentId) + queueIds       // re-listening a played one
+                }
+                start = maxOf(0, ids.indexOf(currentId))
+            } catch (e: Exception) {
+                Log.w(TAG, "In-order queue from server failed; using local table", e)
+            }
+        }
+        if (ids.isEmpty()) {
+            activeContext = null
+            val local = if (CastCharmApp.isOfflineMode) episodeDao.getInOrderQueueLocal(feedId)
+                        else episodeDao.getInOrderQueue(feedId)
+            val localIds = local.map { it.id }
+            val startId = tappedId
+                ?: episodeDao.getInProgressForFeed(feedId)?.id
+                ?: localIds.firstOrNull()
+                ?: return null
+            ids = if (startId in localIds) localIds else listOf(startId) + localIds
+            start = ids.indexOf(startId)
+        }
+        if (ids.isEmpty()) return null
+
+        // Cap the tail; keep everything up to and including the start.
+        val tailEnd = minOf(ids.size, start + 1 + IN_ORDER_QUEUE_LIMIT)
+        val window = ids.subList(start, tailEnd)
+        val windowStart = 0
+
+        // Episodes the phone has never cached cannot be resolved to a URI.
+        if (online) {
+            val missing = window.filter { episodeDao.getEpisodeOnce(it) == null }
+            if (missing.isNotEmpty()) {
+                val repo = EpisodeRepository(CastCharmApp.apiClient.getApi(), episodeDao)
+                for (id in missing) runCatching { repo.fetchEpisodeFromApi(id) }
+            }
+        }
+
+        val built = window.mapIndexed { i, id ->
+            if (i == windowStart && tappedId != null) original.buildUpon().setMediaId("episode_$id").build()
+            else MediaItem.Builder().setMediaId("episode_$id").build()
+        }
+        Log.d(TAG, "In-order queue for feed $feedId: ${built.size} items starting at episode ${window[windowStart]}")
+        return built to windowStart
+    }
+
+    /**
+     * Playlist (and ordinary-feed) queues: the screen already called
+     * /api/player/play, so the server's current episode is the one being
+     * started.  Load the rest of that queue behind it.  A stale context whose
+     * current episode is something else is ignored.
+     */
+    private suspend fun expandFromServerContext(original: MediaItem, tappedId: Int): Pair<List<MediaItem>, Int>? {
+        val state = try {
+            CastCharmApp.apiClient.getApi().getPlayerState()
+        } catch (e: Exception) {
+            return null
+        }
+        if (state.context_type == null || state.current_episode_id != tappedId) return null
+        activeContext = PlayerPlayRequest(
+            context_type = state.context_type, context_id = state.context_id ?: return null,
+            context_filter = state.context_filter ?: "unplayed")
+        val queueIds = state.queue.map { it.id }
+        if (queueIds.size < 2) return null
+        val pos = queueIds.indexOf(tappedId)
+        val ids = if (pos >= 0) queueIds.subList(pos, queueIds.size) else listOf(tappedId) + queueIds
+        val window = ids.take(1 + IN_ORDER_QUEUE_LIMIT)
+        val missing = window.filter { episodeDao.getEpisodeOnce(it) == null }
+        if (missing.isNotEmpty()) {
+            val repo = EpisodeRepository(CastCharmApp.apiClient.getApi(), episodeDao)
+            for (id in missing) runCatching { repo.fetchEpisodeFromApi(id) }
+        }
+        val built = window.mapIndexed { i, id ->
+            if (i == 0) original.buildUpon().setMediaId("episode_$id").build()
+            else MediaItem.Builder().setMediaId("episode_$id").build()
+        }
+        Log.d(TAG, "Queue from server context ${state.context_type}/${state.context_id}: ${built.size} items")
+        return built to 0
+    }
+
+    /** "Continue · Ep. 12 · Title" (or "All caught up") for an in-order feed. */
+    private suspend fun createCatchUpItem(feed: FeedEntity): MediaItem {
+        val next = episodeDao.getInProgressForFeed(feed.id)
+            ?: (if (CastCharmApp.isOfflineMode) episodeDao.getInOrderQueueLocal(feed.id)
+                else episodeDao.getInOrderQueue(feed.id)).firstOrNull()
+        val subtitle = if (next == null) "All caught up" else buildString {
+            next.seq_number?.let { append("Ep. ").append(it).append(" \u00B7 ") }
+            append(next.title ?: "Untitled")
+            if (next.play_position_seconds >= 60) append(" \u00B7 ").append(next.play_position_seconds / 60).append(" min in")
+        }
+        val artworkUri = resolveFeedArtworkUri(context, feed)
+        return MediaItem.Builder()
+            .setMediaId(CATCHUP_PREFIX + feed.id)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(if (next == null) "All caught up" else "Continue")
+                    .setDisplayTitle(if (next == null) "All caught up" else "Continue")
+                    .setSubtitle(subtitle)
+                    .setArtist(feed.title)
+                    .setIsBrowsable(false)
+                    .setIsPlayable(next != null)
+                    .setMediaType(MediaMetadata.MEDIA_TYPE_PODCAST)
+                    .setArtworkUri(artworkUri)
+                    .build()
+            )
+            .build()
+    }
+
     private suspend fun canPlayOffline(item: MediaItem): Boolean {
+        if (item.mediaId.startsWith(CATCHUP_PREFIX)) {
+            val feedId = item.mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull() ?: return false
+            return episodeDao.getInOrderQueueLocal(feedId).isNotEmpty()
+        }
         val episodeId = item.mediaId.removePrefix("episode_").toIntOrNull() ?: return true
         val episode = episodeDao.getEpisodeOnce(episodeId) ?: return false
         val path = episode.local_path ?: return false
         return File(path).exists()
     }
 
-    private suspend fun resolveMediaItem(item: MediaItem): MediaItem {
+    private suspend fun resolveMediaItem(item: MediaItem, embedArtwork: Boolean = true): MediaItem {
         val episodeId = item.mediaId.removePrefix("episode_").toIntOrNull() ?: return item
         val episode = episodeDao.getEpisodeOnce(episodeId) ?: return item
         val feed = feedDao.getFeedOnce(episode.feed_id)
@@ -1212,25 +1598,10 @@ private class PlayerLibrarySessionCallback(
 
         val feedTitle = feed?.title ?: "Unknown Podcast"
         val artworkUri = resolveEpisodeArtworkUri(context, episode)
-        // Embed artwork as artworkData for the AA player screen. artworkUri alone
-        // is sufficient for browse thumbnails but AA's player UI requires an embedded
-        // Bitmap via METADATA_KEY_ALBUM_ART. We transcode to JPEG here because the
-        // cached .img file may be WEBP or PNG, which Gearhead fails to decode,
-        // causing the repeated-fetch loop and fallback to the app icon.
-        val artworkBytes = withContext(Dispatchers.IO) {
-            runCatching {
-                context.contentResolver.openInputStream(artworkUri)?.use { stream ->
-                    val raw = stream.readBytes()
-                    val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
-                    if (bmp != null) {
-                        val out = java.io.ByteArrayOutputStream()
-                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
-                        out.toByteArray()
-                    } else null
-                }
-            }.getOrNull()
-        }
-        Log.d(TAG, "resolveMediaItem episode=$episodeId artworkBytes=${artworkBytes?.size ?: "null"}")
+        // Embedded artwork is what the AA player screen needs for the item that
+        // plays; for the rest of a queue the URI is enough (and embedding 25
+        // covers up front is what made queue starts take seconds).
+        val artworkBytes = if (embedArtwork) artworkBytesFor(context, episode) else null
 
         val feedSpeed = feed?.playback_speed ?: 1f
 
@@ -1325,6 +1696,30 @@ private class PlayerLibrarySessionCallback(
                     .build()
             )
             .build()
+    }
+}
+
+
+// Downsampled JPEG bytes of the episode's artwork for Android Auto's player
+// screen (Gearhead cannot decode the cached .img format via URI). Bounded to
+// ~512 px: cover art is routinely 3000², which is a 36 MB bitmap.
+private suspend fun artworkBytesFor(context: Context, episode: EpisodeEntity): ByteArray? {
+    val artworkUri = resolveEpisodeArtworkUri(context, episode)
+    return withContext(Dispatchers.IO) {
+        runCatching {
+            val raw = context.contentResolver.openInputStream(artworkUri)?.use { it.readBytes() }
+                ?: return@runCatching null
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= 512 && bounds.outHeight / (sample * 2) >= 512) sample *= 2
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return@runCatching null
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+            bmp.recycle()
+            out.toByteArray()
+        }.getOrNull()
     }
 }
 

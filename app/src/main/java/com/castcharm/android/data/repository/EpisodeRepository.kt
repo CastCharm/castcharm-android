@@ -16,6 +16,7 @@ import android.util.Log
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.CastCharmApi
 import com.castcharm.android.data.api.models.EpisodeOut
+import com.castcharm.android.data.api.models.PlayedRequest
 import com.castcharm.android.data.api.models.ProgressRequest
 import com.castcharm.android.data.api.models.parseDuration
 import com.castcharm.android.data.api.models.parseServerDateTime
@@ -87,10 +88,13 @@ class EpisodeRepository(
                 val remoteIds = pageEpisodes.map { it.id }
                 // Determine which local episodes have active phone downloads so they
                 // can be excluded from the prune operation.
+                // Keep rows with an in-flight download, a finished file, or
+                // unsynced listening state: deleting those strands the file on
+                // disk (uncounted, unplayable, undeletable) or loses progress.
                 val preserveIds = episodeDao.getEpisodesByFeedOnce(feedId)
                     .map { it.id }
                     .filter { it in allPhoneDownloadEpisodeIds }
-                    .toSet()
+                    .toSet() + episodeDao.getPreservableIdsForFeed(feedId)
 
                 episodeDao.pruneMissingEpisodesForFeed(
                     feedId = feedId,
@@ -203,7 +207,7 @@ class EpisodeRepository(
             episodeDao.updateProgress(episodeId, position, now, pending = false)
 
             if (existing.played != targetPlayed) {
-                api.togglePlayed(episodeId)
+                api.setPlayed(episodeId, PlayedRequest(targetPlayed))
                 episodeDao.updatePlayedStatus(
                     episodeId,
                     targetPlayed,
@@ -226,6 +230,24 @@ class EpisodeRepository(
         }
     }
 
+    // Explicit set used by the player's "Mark played" button. Writes the final
+    // state directly instead of re-deriving it from an RSS duration (which is
+    // often a few percent off the real file and so never crossed the threshold).
+    suspend fun setPlayed(episodeId: Int, played: Boolean) {
+        val now = System.currentTimeMillis()
+        if (CastCharmApp.isOfflineMode) {
+            episodeDao.updatePlayedStatus(episodeId, played, now, pending = true)
+            return
+        }
+        try {
+            api.setPlayed(episodeId, PlayedRequest(played))
+            episodeDao.updatePlayedStatus(episodeId, played, now, pending = false)
+        } catch (e: Exception) {
+            Log.e("EpisodeRepository", "Error setting played state, marking for later sync", e)
+            episodeDao.updatePlayedStatus(episodeId, played, now, pending = true)
+        }
+    }
+
     suspend fun togglePlayed(episodeId: Int, currentlyPlayed: Boolean) {
         val newState = !currentlyPlayed
 
@@ -240,7 +262,7 @@ class EpisodeRepository(
         }
 
         try {
-            api.togglePlayed(episodeId)
+            api.setPlayed(episodeId, PlayedRequest(newState))
             episodeDao.updatePlayedStatus(episodeId, newState, System.currentTimeMillis(), pending = false)
         } catch (e: Exception) {
             Log.e("EpisodeRepository", "Error toggling played status, marking for later sync", e)
@@ -370,9 +392,12 @@ fun EpisodeOut.toEntity(
         author = author,
         link = link,
         hidden = hidden,
-        played = played,
-        play_position_seconds = play_position_seconds,
-        last_played_at = parseServerDateTime(last_played_at),
+        // Unsynced phone state outranks the server's copy until it is flushed.
+        played = if (existing?.sync_pending_played == true) existing.played else played,
+        play_position_seconds = if (existing != null && (existing.sync_pending_progress || existing.sync_pending_played))
+            existing.play_position_seconds else play_position_seconds,
+        last_played_at = if (existing != null && (existing.sync_pending_progress || existing.sync_pending_played))
+            existing.last_played_at else parseServerDateTime(last_played_at),
         status = resolvedStatus,
         // Always preserve phone-only fields from the existing DB row.
         local_path = existing?.local_path,

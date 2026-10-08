@@ -87,6 +87,20 @@ interface EpisodeDao {
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId AND hidden = 0 AND played = 0 ORDER BY published_at DESC")
     fun getUnplayedEpisodesByFeed(feedId: Int): Flow<List<EpisodeEntity>>
 
+    // Offline search fallback. Matches the given term against title and
+    // description columns. The percent signs must be included by the caller
+    // (e.g., "%dogs%") so the DAO signature stays declarative.
+    @Query("""
+        SELECT * FROM episodes
+        WHERE hidden = 0 AND (
+            title LIKE :term COLLATE NOCASE
+            OR description LIKE :term COLLATE NOCASE
+        )
+        ORDER BY published_at DESC
+        LIMIT :limit
+    """)
+    suspend fun searchEpisodesLocal(term: String, limit: Int = 40): List<EpisodeEntity>
+
     @Query("SELECT * FROM episodes WHERE played = 0 AND play_position_seconds > 0 ORDER BY last_played_at DESC LIMIT :limit")
     fun getContinueListening(limit: Int = 10): Flow<List<EpisodeEntity>>
 
@@ -132,6 +146,38 @@ interface EpisodeDao {
     """)
     suspend fun getEpisodesForAndroidAutoByFeed(feedId: Int): List<EpisodeEntity>
 
+    // Oldest-first listing for feeds listened to in order (stories, serials).
+    @Query("""
+        SELECT * FROM episodes
+        WHERE feed_id = :feedId
+        ORDER BY published_at ASC, episode_number ASC, id ASC
+    """)
+    suspend fun getEpisodesForAndroidAutoByFeedOldestFirst(feedId: Int): List<EpisodeEntity>
+
+    // The in-order queue: everything not yet heard, oldest first. The local-only
+    // variant is what offline playback can actually play.
+    @Query("""
+        SELECT * FROM episodes
+        WHERE feed_id = :feedId AND played = 0 AND hidden = 0
+        ORDER BY published_at ASC, episode_number ASC, id ASC
+    """)
+    suspend fun getInOrderQueue(feedId: Int): List<EpisodeEntity>
+
+    @Query("""
+        SELECT * FROM episodes
+        WHERE feed_id = :feedId AND played = 0 AND hidden = 0 AND local_path IS NOT NULL
+        ORDER BY published_at ASC, episode_number ASC, id ASC
+    """)
+    suspend fun getInOrderQueueLocal(feedId: Int): List<EpisodeEntity>
+
+    // The episode "Continue" resumes: most recently left mid-way, if any.
+    @Query("""
+        SELECT * FROM episodes
+        WHERE feed_id = :feedId AND played = 0 AND hidden = 0 AND play_position_seconds > 0
+        ORDER BY last_played_at DESC LIMIT 1
+    """)
+    suspend fun getInProgressForFeed(feedId: Int): EpisodeEntity?
+
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId ORDER BY published_at DESC")
     suspend fun getAllEpisodesByFeedIdRaw(feedId: Int): List<EpisodeEntity>
 
@@ -162,8 +208,34 @@ interface EpisodeDao {
     @Query("SELECT * FROM episodes WHERE feed_id = :feedId AND played = 1 ORDER BY last_played_at ASC LIMIT :limit")
     suspend fun getOldestPlayedEpisodes(feedId: Int, limit: Int): List<EpisodeEntity>
 
-    @Query("SELECT * FROM episodes WHERE played = 1 ORDER BY last_played_at ASC LIMIT :limit")
+    // Candidates for quota cleanup: played episodes that actually hold a file.
+    @Query("SELECT * FROM episodes WHERE played = 1 AND local_path IS NOT NULL ORDER BY last_played_at ASC LIMIT :limit")
     suspend fun getOldestPlayedEpisodesGlobal(limit: Int): List<EpisodeEntity>
+
+    // Targeted writes, so a stale full-row copy can never stomp newer progress.
+    @Query("UPDATE episodes SET local_path = NULL, local_size_bytes = NULL, status = 'pending', download_progress = 0 WHERE id = :episodeId")
+    suspend fun clearLocalFile(episodeId: Int)
+
+    // SyncWorker clears a pending flag only if the row still holds the value it
+    // sent; a newer write in between keeps its flag and is flushed next time.
+    @Query("UPDATE episodes SET sync_pending_progress = 0 WHERE id = :episodeId AND play_position_seconds = :sentPosition")
+    suspend fun clearPendingProgressIf(episodeId: Int, sentPosition: Int)
+
+    @Query("UPDATE episodes SET sync_pending_played = 0 WHERE id = :episodeId AND played = :sentPlayed")
+    suspend fun clearPendingPlayedIf(episodeId: Int, sentPlayed: Boolean)
+
+    @Query("UPDATE episodes SET sync_pending_progress = 0, sync_pending_played = 0 WHERE id = :episodeId")
+    suspend fun clearPendingFlags(episodeId: Int)
+
+    // Rows a server-side prune must leave alone: they hold a file or unsynced state.
+    @Query("SELECT id FROM episodes WHERE feed_id = :feedId AND (local_path IS NOT NULL OR sync_pending_progress = 1 OR sync_pending_played = 1)")
+    suspend fun getPreservableIdsForFeed(feedId: Int): List<Int>
+
+    @Query("SELECT * FROM episodes WHERE feed_id IN (:feedIds) AND local_path IS NOT NULL")
+    suspend fun getEpisodesWithFilesForFeeds(feedIds: List<Int>): List<EpisodeEntity>
+
+    @Query("SELECT * FROM episodes WHERE local_path IS NULL AND id IN (:ids)")
+    suspend fun getEpisodesWithoutFileByIds(ids: List<Int>): List<EpisodeEntity>
 
     @Query("UPDATE episodes SET download_progress = :progress WHERE id = :episodeId")
     suspend fun updateDownloadProgress(episodeId: Int, progress: Int)
@@ -266,15 +338,24 @@ interface EpisodeDao {
                 else -> ep.download_progress
             }
 
-            // Build the merged entity: keep all server fields except the four
-            // phone-only fields which are always copied from the existing row.
+            // Build the merged entity: keep all server fields except the
+            // phone-only ones, which always come from the existing row.
+            // Unsynced listening state is phone-only too: while a pending
+            // flag is set the phone's value is newer than anything the server
+            // can tell us, so it stays put until SyncWorker has pushed it.
+            val pendingProgress = ex?.sync_pending_progress == true
+            val pendingPlayed = ex?.sync_pending_played == true
+            val keepListening = ex != null && (pendingProgress || pendingPlayed)
             ep.copy(
                 local_path = ex?.local_path,
                 local_size_bytes = ex?.local_size_bytes,
                 download_progress = mergedProgress,
                 status = mergedStatus,
-                sync_pending_progress = ex?.sync_pending_progress ?: false,
-                sync_pending_played = ex?.sync_pending_played ?: false
+                played = if (ex != null && pendingPlayed) ex.played else ep.played,
+                play_position_seconds = if (keepListening) ex!!.play_position_seconds else ep.play_position_seconds,
+                last_played_at = if (keepListening) ex!!.last_played_at else ep.last_played_at,
+                sync_pending_progress = pendingProgress,
+                sync_pending_played = pendingPlayed
             )
         }
 

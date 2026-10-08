@@ -58,7 +58,7 @@ class ApiClient(private val context: Context) {
         }
 
         baseUrl = normalizedBaseUrl
-        cookieJar = PersistentCookieJar(context)
+        cookieJar = PersistentCookieJar.getInstance(context)
 
         // SessionStateInterceptor is added first so it sees both request and response
         // before any other interceptor logs. ApiKeyInterceptor attaches the stored
@@ -191,12 +191,16 @@ private class SessionStateInterceptor : Interceptor {
 // on load (so stale tokens are never sent) and on request (so tokens that expire
 // while the app is running are lazily evicted and the file is updated).
 //
-// Concurrency: DownloadWorker and PodcastArtworkProvider each construct their
-// own PersistentCookieJar pointing at the same file. Every read/write is
-// synchronized on `lock` and every persist goes through a write-to-temp + atomic
-// rename so an interleaved save from a sibling instance can't produce a
-// half-written or truncated cookies.json.
-class PersistentCookieJar(private val context: Context) : CookieJar {
+// Consumers call PersistentCookieJar.getInstance(context) to obtain the
+// process-wide singleton. The singleton pattern removes the need for an
+// in-memory shim in PlayerService and eliminates the risk of two jars fighting
+// over the same on-disk file. Every read/write is synchronized on `lock` and
+// every persist goes through a write-to-temp + atomic rename so a save can't
+// produce a half-written or truncated cookies.json.
+class PersistentCookieJar private constructor(context: Context) : CookieJar {
+    // Use applicationContext so this singleton is safe to hold long-term
+    // without pinning any Activity or Service.
+    private val context: Context = context.applicationContext
     private val cookieFile = File(context.filesDir, "cookies.json")
     private val tmpFile = File(context.filesDir, "cookies.json.tmp")
     // In-memory map of hostname → cookie list for fast per-request lookup.
@@ -296,6 +300,27 @@ class PersistentCookieJar(private val context: Context) : CookieJar {
             cookies.clear()
             cookieFile.delete()
             tmpFile.delete()
+        }
+    }
+
+    companion object {
+        @Volatile
+        private var INSTANCE: PersistentCookieJar? = null
+
+        // Process-wide accessor. ContentProviders create their httpClient
+        // before Application.onCreate runs, so this must be safe to call
+        // without any other app-level init having completed — it only reads
+        // context.filesDir, which is available immediately.
+        fun getInstance(context: Context): PersistentCookieJar {
+            val existing = INSTANCE
+            if (existing != null) return existing
+            synchronized(this) {
+                val doubleChecked = INSTANCE
+                if (doubleChecked != null) return doubleChecked
+                val created = PersistentCookieJar(context)
+                INSTANCE = created
+                return created
+            }
         }
     }
 }

@@ -10,9 +10,9 @@ package com.castcharm.android.ui.player
 //   - reconcilePlayedForUi(): adjusts episode.played locally so the scrubber
 //     color and "mark played" button update immediately when the threshold is
 //     crossed, without waiting for the DB write to round-trip.
-//   - progressTrackingJob: 10-second sync loop matching PlayerService's logic
-//     (PlayerService handles the actual server syncing; this job is an extra
-//     safety net for when PlayerScreen is in the foreground).
+//   - Progress and played state are written by PlayerService only; this
+//     ViewModel never writes them (two writers used to disagree on the
+//     threshold and flip episodes between played and unplayed).
 //   - Sleep timer: counts down in UI state only; pauses the player when it hits 0.
 //   - justMarkedPlayed: one-shot flag consumed by PlayerScreen to auto-dismiss.
 
@@ -52,7 +52,6 @@ class PlayerViewModel : ViewModel() {
     private val db = AppDatabase.getDatabase(CastCharmApp.instance)
     private val playerController = CastCharmApp.playerController
 
-    private var progressTrackingJob: Job? = null
     private var playbackStateCollectionJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var loadEpisodeJob: Job? = null
@@ -71,9 +70,10 @@ class PlayerViewModel : ViewModel() {
             }
         }
 
-        registerAutoAdvance()
+        // Progress and played state are written by PlayerService alone (it runs
+        // whenever audio does: car, headset, screen off). This ViewModel only
+        // mirrors the player for display.
         observeSharedPlaybackState()
-        startProgressTracking()
     }
 
     private fun episodeRepositoryOrNull(): EpisodeRepository? {
@@ -107,81 +107,6 @@ class PlayerViewModel : ViewModel() {
         )
 
         return if (episode.played == targetPlayed) episode else episode.copy(played = targetPlayed)
-    }
-
-    private fun persistImmediatePlayedReconciliationIfNeeded(
-        episode: EpisodeEntity,
-        positionMs: Long,
-        durationMs: Long
-    ) {
-        val positionSeconds = (positionMs / 1000L).toInt()
-        val durationSeconds = durationMs.takeIf { it > 0L }?.div(1000L)?.toInt() ?: episode.duration
-
-        val targetPlayed = EpisodeRepository.derivePlayedState(
-            positionSeconds = positionSeconds,
-            durationSeconds = durationSeconds,
-            currentPlayed = episode.played,
-            thresholdPct = autoPlayedThresholdPct
-        )
-
-        if (episode.played == targetPlayed) return
-
-        viewModelScope.launch {
-            try {
-                val repo = episodeRepositoryOrNull()
-                if (repo != null) {
-                    repo.updateProgress(
-                        episodeId = episode.id,
-                        position = positionSeconds,
-                        durationSeconds = durationSeconds,
-                        playedThresholdPct = autoPlayedThresholdPct
-                    )
-                } else {
-                    db.episodeDao().updateProgress(
-                        episode.id,
-                        positionSeconds,
-                        System.currentTimeMillis(),
-                        pending = true
-                    )
-                    db.episodeDao().updatePlayedStatus(
-                        episode.id,
-                        targetPlayed,
-                        System.currentTimeMillis(),
-                        pending = true
-                    )
-                }
-            } catch (_: Exception) {
-                db.episodeDao().updateProgress(
-                    episode.id,
-                    positionSeconds,
-                    System.currentTimeMillis(),
-                    pending = true
-                )
-                db.episodeDao().updatePlayedStatus(
-                    episode.id,
-                    targetPlayed,
-                    System.currentTimeMillis(),
-                    pending = true
-                )
-            }
-        }
-    }
-
-    private fun registerAutoAdvance() {
-        playerController.setOnCompletion {
-            viewModelScope.launch {
-                if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return@launch
-                try {
-                    val state = CastCharmApp.apiClient.getApi().playerNext()
-                    val next = state.current_episode
-                    if (next != null && next.status == "downloaded") {
-                        playerController.playEpisode(next.id)
-                    }
-                } catch (_: Exception) {
-                    // No server context active or end of queue — do nothing
-                }
-            }
-        }
     }
 
     private fun observeSharedPlaybackState() {
@@ -223,14 +148,6 @@ class PlayerViewModel : ViewModel() {
                                 positionMs = playbackState.positionMs,
                                 durationMs = playbackState.durationMs
                             )
-
-                            if (reconciledEpisode.played != episode.played) {
-                                persistImmediatePlayedReconciliationIfNeeded(
-                                    episode = episode,
-                                    positionMs = playbackState.positionMs,
-                                    durationMs = playbackState.durationMs
-                                )
-                            }
 
                             nextState = nextState.copy(
                                 episode = reconciledEpisode,
@@ -298,88 +215,6 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
-    private fun startProgressTracking() {
-        progressTrackingJob?.cancel()
-        progressTrackingJob = viewModelScope.launch {
-            var lastSyncMs = 0L
-
-            while (isActive) {
-                val state = playerController.playbackState.value
-                val activeEpisodeId = state.episodeId
-                val positionMs = state.positionMs
-                val durationMs = state.durationMs
-                val playing = state.isPlaying
-
-                val positionSeconds = (positionMs / 1000L).toInt()
-                val durationSeconds = durationMs.takeIf { it > 0L }?.div(1000L)?.toInt()
-                val now = System.currentTimeMillis()
-
-                if (activeEpisodeId != null && playing && now - lastSyncMs >= 10_000L) {
-                    try {
-                        val repo = episodeRepositoryOrNull()
-                        if (repo != null) {
-                            repo.updateProgress(
-                                episodeId = activeEpisodeId,
-                                position = positionSeconds,
-                                durationSeconds = durationSeconds,
-                                playedThresholdPct = autoPlayedThresholdPct
-                            )
-                        } else {
-                            val existing = db.episodeDao().getEpisodeOnce(activeEpisodeId)
-                            val targetPlayed = EpisodeRepository.derivePlayedState(
-                                positionSeconds = positionSeconds,
-                                durationSeconds = durationSeconds ?: existing?.duration,
-                                currentPlayed = existing?.played ?: false,
-                                thresholdPct = autoPlayedThresholdPct
-                            )
-
-                            db.episodeDao().updateProgress(
-                                activeEpisodeId,
-                                positionSeconds,
-                                now,
-                                pending = true
-                            )
-                            if (existing != null && existing.played != targetPlayed) {
-                                db.episodeDao().updatePlayedStatus(
-                                    activeEpisodeId,
-                                    targetPlayed,
-                                    now,
-                                    pending = true
-                                )
-                            }
-                        }
-                        lastSyncMs = now
-                    } catch (_: Exception) {
-                        val existing = db.episodeDao().getEpisodeOnce(activeEpisodeId)
-                        val targetPlayed = EpisodeRepository.derivePlayedState(
-                            positionSeconds = positionSeconds,
-                            durationSeconds = durationSeconds ?: existing?.duration,
-                            currentPlayed = existing?.played ?: false,
-                            thresholdPct = autoPlayedThresholdPct
-                        )
-
-                        db.episodeDao().updateProgress(
-                            activeEpisodeId,
-                            positionSeconds,
-                            now,
-                            pending = true
-                        )
-                        if (existing != null && existing.played != targetPlayed) {
-                            db.episodeDao().updatePlayedStatus(
-                                activeEpisodeId,
-                                targetPlayed,
-                                now,
-                                pending = true
-                            )
-                        }
-                    }
-                }
-
-                delay(1000)
-            }
-        }
-    }
-
     fun stop() {
         playerController.stopAndClear()
     }
@@ -425,32 +260,14 @@ class PlayerViewModel : ViewModel() {
                     episode.play_position_seconds
                 }
 
+                // Set the state outright. Deriving it from the RSS duration
+                // silently did nothing whenever that duration was longer than
+                // the real file.
                 val repo = episodeRepositoryOrNull()
                 if (repo != null) {
-                    repo.updateProgress(
-                        episodeId = episode.id,
-                        position = finalPositionSeconds,
-                        durationSeconds = episode.duration,
-                        playedThresholdPct = autoPlayedThresholdPct
-                    )
+                    repo.setPlayed(episode.id, true)
                 } else {
-                    val now = System.currentTimeMillis()
-                    db.episodeDao().updateProgress(
-                        episode.id,
-                        finalPositionSeconds,
-                        now,
-                        pending = true
-                    )
-                    db.episodeDao().updatePlayedStatus(
-                        episode.id,
-                        true,
-                        now,
-                        pending = true
-                    )
-                }
-
-                if (finalDurationMs > 0L) {
-                    playerController.seekTo(finalDurationMs)
+                    db.episodeDao().updatePlayedStatus(episode.id, true, System.currentTimeMillis(), pending = true)
                 }
 
                 _uiState.value = _uiState.value.copy(
@@ -462,7 +279,12 @@ class PlayerViewModel : ViewModel() {
                     justMarkedPlayed = true
                 )
 
-                playerController.stopAndClear()
+                // In a queue, "mark played" means "on to the next one".
+                if (playerController.hasNextMediaItem()) {
+                    playerController.seekToNextMediaItem()
+                } else {
+                    playerController.stopAndClear()
+                }
             } catch (_: Exception) {
             }
         }
@@ -518,7 +340,6 @@ class PlayerViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        progressTrackingJob?.cancel()
         playbackStateCollectionJob?.cancel()
         sleepTimerJob?.cancel()
         loadEpisodeJob?.cancel()

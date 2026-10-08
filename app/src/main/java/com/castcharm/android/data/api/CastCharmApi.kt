@@ -51,12 +51,30 @@ interface CastCharmApi {
     @DELETE("api/settings/api-keys/self")
     suspend fun revokeOwnKey()
 
+    // Every key the server still honours; used to notice when this device's
+    // key was revoked while the session cookie keeps requests working.
+    @GET("api/settings/api-keys")
+    suspend fun listApiKeys(): List<ApiKeyInfo>
+
+    // Renames a key by id. The Android app calls this only for its own key
+    // (id stored in AuthStore at enrolment time) so the user can label the
+    // device something friendlier than the default hardware model string.
+    @PATCH("api/settings/api-keys/{key_id}")
+    suspend fun renameApiKey(
+        @Path("key_id") keyId: Int,
+        @Body body: ApiKeyRenameRequest,
+    )
+
     // ---- Feeds --------------------------------------------------------------
     @GET("api/feeds")
     suspend fun getFeeds(): List<FeedOut>
 
     @GET("api/feeds/{feed_id}")
     suspend fun getFeed(@Path("feed_id") feedId: Int): FeedOut
+
+    // Per-feed settings the phone can change (currently just play_order).
+    @PUT("api/feeds/{feed_id}")
+    suspend fun updateFeed(@Path("feed_id") feedId: Int, @Body body: FeedUpdateRequest): FeedOut
 
     // Paginated episode list for a single feed. limit+1 is requested by
     // EpisodeRepository so it can detect whether more pages exist.
@@ -135,6 +153,12 @@ interface CastCharmApi {
     @POST("api/episodes/{episode_id}/played")
     suspend fun togglePlayed(@Path("episode_id") episodeId: Int)
 
+    // Sets played/unplayed explicitly. Safe to repeat — what every automatic
+    // path (end of episode, threshold, offline flush) uses so a second call can
+    // never flip an episode back.
+    @POST("api/episodes/{episode_id}/played")
+    suspend fun setPlayed(@Path("episode_id") episodeId: Int, @Body body: PlayedRequest)
+
     // ---- Hide / unhide ------------------------------------------------------
     // Hidden episodes are excluded from the default episode list and counts.
     @POST("api/episodes/{episode_id}/hide")
@@ -158,6 +182,11 @@ interface CastCharmApi {
     // Basic server health info (version, storage usage).
     @GET("api/status")
     suspend fun getStatus(): AppStatus
+
+    // Request ceilings the server enforces (see ServerLimits). Older servers
+    // return 404; ServerLimits falls back to defaults in that case.
+    @GET("api/limits")
+    suspend fun getLimits(): LimitsOut
 
     // Global server configuration including download path, naming rules, and
     // the played-detection threshold. Used to drive filename and progress logic.
@@ -201,6 +230,14 @@ interface CastCharmApi {
     suspend fun getFeedPlaylistMemberships(@Query("feed_id") feedId: Int): FeedPlaylistMemberships
 
     // ---- Player context -----------------------------------------------------
+    @GET("api/player/state")
+    suspend fun getPlayerState(): PlayerStateOut
+
+    // Direct pointer update, no smart-start: keeps the server's "current
+    // episode" in step as the phone's own queue advances.
+    @PUT("api/player/state")
+    suspend fun updatePlayerState(@Body body: PlayerPlayRequest): PlayerStateOut
+
     @POST("api/player/play")
     suspend fun playerPlay(@Body body: PlayerPlayRequest): PlayerStateOut
 

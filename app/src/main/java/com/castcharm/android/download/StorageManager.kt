@@ -13,6 +13,7 @@ package com.castcharm.android.download
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.db.AppDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -61,14 +62,14 @@ class StorageManager(private val context: Context) {
         prefs.edit().putLong("quota_bytes", quotaBytes).apply()
     }
 
-    // Checks if the current usage exceeds the quota and deletes oldest played
-    // episodes until usage is at or below the limit. Called by DownloadWorker
-    // before beginning a download.
-    suspend fun enforceQuota() = withContext(Dispatchers.IO) {
+    // Frees room for *neededBytes* more by deleting the oldest played episodes
+    // until used + needed fits the quota. Called by DownloadWorker before it
+    // starts writing. With no argument it just trims usage back to the quota.
+    suspend fun enforceQuota(neededBytes: Long = 0L) = withContext(Dispatchers.IO) {
         val used = getTotalUsedBytes()
-        if (used > quotaBytes) {
-            val excessBytes = used - quotaBytes
-            deleteOldestEpisodes(excessBytes)
+        val excess = used + neededBytes - quotaBytes
+        if (excess > 0) {
+            deleteOldestEpisodes(excess)
         }
     }
 
@@ -87,20 +88,24 @@ class StorageManager(private val context: Context) {
                 if (file.exists()) {
                     val fileSize = file.length()
                     if (file.delete()) {
-                        // Reset DB row: clear path/size and put status back to "pending"
-                        // so the episode can be re-downloaded from the server if needed.
-                        episodeDao.update(
-                            episode.copy(
-                                local_path = null,
-                                local_size_bytes = null,
-                                status = "pending"
-                            )
-                        )
+                        episodeDao.clearLocalFile(episode.id)
                         freedBytes += fileSize
                     }
                 }
             }
         }
+    }
+
+    // Deletes a single downloaded episode's file and clears its local_path/size
+    // in the DB. Returns true if a file was actually removed. Used by the
+    // batch-delete action on EpisodeListScreen.
+    suspend fun deleteLocalFile(episodeId: Int): Boolean = withContext(Dispatchers.IO) {
+        val episode = episodeDao.getEpisodeOnce(episodeId) ?: return@withContext false
+        val path = episode.local_path ?: return@withContext false
+        val file = File(path)
+        val removed = if (file.exists()) file.delete() else false
+        episodeDao.clearLocalFile(episodeId)
+        removed
     }
 
     // Deletes all locally downloaded episode files and resets their DB rows.
@@ -110,11 +115,57 @@ class StorageManager(private val context: Context) {
         for (episode in episodes) {
             episode.local_path?.let { path ->
                 File(path).delete()
-                episodeDao.update(
-                    episode.copy(local_path = null, local_size_bytes = null, status = "pending")
-                )
+                episodeDao.clearLocalFile(episode.id)
             }
         }
+        sweepPartFiles()
+    }
+
+    // Removes leftovers of downloads that never finished (DownloadWorker writes
+    // to "<name>.<workId>.part" and renames on completion).
+    fun sweepPartFiles() {
+        downloadDir.listFiles { f -> f.name.endsWith(".part") }?.forEach { runCatching { it.delete() } }
+    }
+
+    // Re-links audio files in the download folder that the database no longer
+    // knows about (an older destructive migration, a pruned or hidden episode).
+    // The filename starts with the episode id, which is all we need. Files for
+    // episodes the server no longer has are deleted; anything still being
+    // written (a downloads row, or a .part file) is left alone.
+    suspend fun reconcileOrphanFiles(api: com.castcharm.android.data.api.CastCharmApi) = withContext(Dispatchers.IO) {
+        val files = downloadDir.listFiles() ?: return@withContext
+        val inFlight = db.downloadDao().getAllDownloadsOnceOrdered().map { it.episode_id }.toSet()
+        val repo = com.castcharm.android.data.repository.EpisodeRepository(api, episodeDao)
+        for (file in files) {
+            if (!file.isFile || file.name.endsWith(".part")) continue
+            val id = Regex("^(\\d+)_").find(file.name)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            if (id in inFlight) continue
+            val row = episodeDao.getEpisodeOnce(id)
+            when {
+                row?.local_path == file.absolutePath -> continue           // already linked
+                row?.local_path != null -> continue                        // linked to another copy
+                row != null -> link(row.id, file)
+                else -> {
+                    val fetched = runCatching { repo.fetchEpisodeFromApi(id) }.getOrNull()
+                    if (fetched != null) link(fetched.id, file)
+                    else if (CastCharmApp.apiClient.isInitialized && !CastCharmApp.isOfflineMode) {
+                        // Server says it doesn't exist: the file is just taking space.
+                        runCatching { file.delete() }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun link(episodeId: Int, file: File) {
+        val row = episodeDao.getEpisodeOnce(episodeId) ?: return
+        // A truncated leftover must not be presented as a complete download.
+        val expected = row.enclosure_length ?: 0L
+        if (expected > 0 && file.length() < expected * 95 / 100) {
+            runCatching { file.delete() }
+            return
+        }
+        episodeDao.updateDownloadComplete(episodeId, file.absolutePath, file.length())
     }
 
     // Returns the File where a downloaded episode should be saved.

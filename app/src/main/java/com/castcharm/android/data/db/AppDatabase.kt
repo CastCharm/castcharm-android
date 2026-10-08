@@ -15,6 +15,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.castcharm.android.data.db.dao.DownloadDao
 import com.castcharm.android.data.db.dao.EpisodeDao
 import com.castcharm.android.data.db.dao.FeedDao
@@ -24,7 +26,7 @@ import com.castcharm.android.data.db.entities.FeedEntity
 
 @Database(
     entities = [FeedEntity::class, EpisodeEntity::class, DownloadEntity::class],
-    version = 4
+    version = 5
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun feedDao(): FeedDao
@@ -35,6 +37,13 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        // 4 → 5: feeds.play_order ("oldest" = listen in order).
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE feeds ADD COLUMN play_order TEXT")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             // Double-checked locking: check INSTANCE without the lock first for
             // performance, then enter the lock only when INSTANCE is null.
@@ -43,7 +52,13 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "castcharm.db"
-                ).fallbackToDestructiveMigration().build()
+                )
+                    // Known schema steps migrate in place so local_path links and
+                    // unsynced offline progress survive an update. The destructive
+                    // fallback only covers a jump no migration describes.
+                    .addMigrations(MIGRATION_4_5)
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }

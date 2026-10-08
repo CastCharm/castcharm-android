@@ -19,8 +19,10 @@ import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.data.db.entities.FeedEntity
 import com.castcharm.android.data.repository.EpisodeRepository
 import com.castcharm.android.data.repository.FeedRepository
+import com.castcharm.android.data.api.models.FeedUpdateRequest
 import com.castcharm.android.data.api.models.PlayerPlayRequest
 import com.castcharm.android.download.DownloadScheduler
+import com.castcharm.android.download.StorageManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,8 +41,25 @@ data class EpisodeListUiState(
     val errorMessage: String? = null,
     val hasMore: Boolean = false,
     val selectedEpisodes: Set<Int> = emptySet(),
-    val playlistMemberEpisodeIds: Set<Int> = emptySet()
+    val playlistMemberEpisodeIds: Set<Int> = emptySet(),
+    // For a listen-in-order feed: what "Continue" will play (null = caught up).
+    val nextUp: NextUp? = null
 )
+
+data class NextUp(
+    val episodeId: Int,
+    val seqNumber: Int?,
+    val title: String?,
+    val positionSeconds: Int,
+    val resume: Boolean
+) {
+    /** "Ep. 12 · Title · 14 min in" */
+    val line: String get() = buildString {
+        seqNumber?.let { append("Ep. ").append(it).append(" \u00B7 ") }
+        append(title ?: "Untitled")
+        if (resume && positionSeconds >= 60) append(" \u00B7 ").append(positionSeconds / 60).append(" min in")
+    }
+}
 
 class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
     private val _uiState = MutableStateFlow(EpisodeListUiState())
@@ -48,6 +67,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
 
     private val db = AppDatabase.getDatabase(CastCharmApp.instance)
     private val downloadScheduler = DownloadScheduler(CastCharmApp.instance)
+    private val storageManager = StorageManager(CastCharmApp.instance)
 
     init {
         loadFeedAndEpisodes()
@@ -130,6 +150,55 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
 
     fun reloadFromDb() {
         // Flow-backed already.
+        refreshNextUp()
+    }
+
+    // Server first (it knows every episode, not just the page we cached), the
+    // local table otherwise.  Only meaningful for a listen-in-order feed.
+    private var lastNextUpFetchMs = 0L
+
+    fun refreshNextUp(force: Boolean = false) {
+        viewModelScope.launch {
+            val feed = db.feedDao().getFeedOnce(feedId)
+            if (feed == null || !feed.listenInOrder) {
+                _uiState.update { it.copy(nextUp = null) }
+                return@launch
+            }
+            val now = System.currentTimeMillis()
+            val askServer = force || now - lastNextUpFetchMs > 30_000L
+            val fromServer = if (askServer && !CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized) {
+                lastNextUpFetchMs = now
+                runCatching { CastCharmApp.apiClient.getApi().getFeed(feedId).next_up }.getOrNull()
+                    ?.let { NextUp(it.episode_id, it.seq_number, it.title, it.position_seconds, it.resume) }
+            } else null
+            val next = fromServer ?: run {
+                val ep = db.episodeDao().getInProgressForFeed(feedId)
+                    ?: (if (CastCharmApp.isOfflineMode) db.episodeDao().getInOrderQueueLocal(feedId)
+                        else db.episodeDao().getInOrderQueue(feedId)).firstOrNull()
+                ep?.let { NextUp(it.id, it.seq_number, it.title, it.play_position_seconds, it.play_position_seconds > 0) }
+            }
+            _uiState.update { it.copy(nextUp = next) }
+        }
+    }
+
+    // The one per-feed playback setting the phone can change. Server first so
+    // every device agrees; the local row follows.
+    fun setListenInOrder(enabled: Boolean) {
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) {
+            _uiState.update { it.copy(errorMessage = "Connect to the server to change this setting") }
+            return
+        }
+        viewModelScope.launch {
+            val value = if (enabled) "oldest" else "newest"
+            try {
+                CastCharmApp.apiClient.getApi().updateFeed(feedId, FeedUpdateRequest(play_order = value))
+                db.feedDao().updatePlayOrder(feedId, value)
+                _uiState.update { it.copy(feed = db.feedDao().getFeedOnce(feedId)) }
+                refreshNextUp(force = true)
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "Couldn't save setting: ${e.localizedMessage}") }
+            }
+        }
     }
 
     fun refreshEpisodes() {
@@ -155,6 +224,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                             errorMessage = null
                         )
                     }
+                    refreshNextUp()
                     return@launch
                 }
 
@@ -204,6 +274,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                         errorMessage = null
                     )
                 }
+                refreshNextUp()
             } catch (e: Exception) {
                 Log.e("EpisodeListViewModel", "Failed to refresh episodes", e)
                 _uiState.update {
@@ -358,6 +429,36 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         viewModelScope.launch {
             _uiState.value.selectedEpisodes.forEach { id ->
                 downloadScheduler.scheduleDownload(id)
+            }
+            clearSelection()
+        }
+    }
+
+    // Applies the played state to every currently-selected episode. Reuses the
+    // existing togglePlayed() path per-episode so pending/offline handling and
+    // server sync behave identically to a single toggle.
+    fun markSelectedPlayed(played: Boolean) {
+        viewModelScope.launch {
+            val ids = _uiState.value.selectedEpisodes
+            val currentEpisodes = _uiState.value.episodes.associateBy { it.id }
+            ids.forEach { id ->
+                val current = currentEpisodes[id]?.played ?: false
+                if (current != played) {
+                    togglePlayed(id, current)
+                }
+            }
+            clearSelection()
+        }
+    }
+
+    // Removes the on-disk file for every currently-selected episode that has
+    // one, then clears the selection. Episodes that aren't downloaded are
+    // silently skipped inside deleteLocalFile(). This affects the phone only —
+    // the episode remains available on the server.
+    fun deleteSelectedDownloads() {
+        viewModelScope.launch {
+            _uiState.value.selectedEpisodes.forEach { id ->
+                runCatching { storageManager.deleteLocalFile(id) }
             }
             clearSelection()
         }

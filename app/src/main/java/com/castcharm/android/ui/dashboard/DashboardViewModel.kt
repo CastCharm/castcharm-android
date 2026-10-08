@@ -178,8 +178,13 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
+    private var refreshJob: kotlinx.coroutines.Job? = null
+
     fun refresh() {
-        viewModelScope.launch {
+        // init and the first ON_RESUME both call this; overlapping runs would
+        // fetch everything twice and race on isRefreshing.
+        if (refreshJob?.isActive == true) return
+        refreshJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isRefreshing = true,

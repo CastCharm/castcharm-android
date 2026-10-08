@@ -52,12 +52,17 @@ class LoginViewModel : ViewModel() {
 
     init {
         // Pre-populate the server URL field with the previously saved value
-        // so returning users don't have to type it again.
+        // so returning users don't have to type it again — and, when we do have
+        // a saved URL, immediately probe the server so the password field
+        // appears without an extra Connect tap. This restores the one-step
+        // feel of the old login for anyone bounced back here by a revoked key
+        // or a password change.
         viewModelScope.launch {
             val serverUrlKey = stringPreferencesKey("server_url")
             val savedUrl = CastCharmApp.instance.dataStore.data.map { it[serverUrlKey] }.firstOrNull()
-            if (savedUrl != null) {
+            if (!savedUrl.isNullOrBlank()) {
                 _uiState.value = _uiState.value.copy(serverUrl = savedUrl)
+                connect()
             }
         }
     }

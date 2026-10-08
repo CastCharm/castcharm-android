@@ -85,6 +85,9 @@ class PlayerController(private val context: Context) {
     // Holds a play request that arrived before the MediaController was ready.
     // Replayed in the listener callback once the controller connects.
     private var pendingPlaybackRequest: EpisodePlaybackRequest? = null
+    // The in-flight playEpisode() lookup. Cancelled by the next request and by
+    // stop/clear, so tapping A then B can never end with A playing.
+    private var playJob: kotlinx.coroutines.Job? = null
 
     // Optional callbacks for callers that need imperative notification
     // (e.g., triggering side effects outside the StateFlow observation chain).
@@ -176,6 +179,7 @@ class PlayerController(private val context: Context) {
                 if (playbackState == Player.STATE_ENDED) {
                     // Notify imperative callback so callers can auto-advance queues.
                     onCompletion?.invoke()
+                    advanceFromServerIfNeeded()
                 }
                 updatePlaybackStateFromController()
             }
@@ -286,11 +290,13 @@ class PlayerController(private val context: Context) {
     // Public entry point used by PlayerViewModel and Android Auto. Runs
     // buildEpisodePlaybackRequest() on IO then hands off to playUri() on Main.
     fun playEpisode(episodeId: Int) {
-        scope.launch {
+        playJob?.cancel()
+        playJob = scope.launch {
             try {
                 val request = withContext(Dispatchers.IO) {
                     buildEpisodePlaybackRequest(episodeId)
                 } ?: return@launch
+                if (CastCharmApp.authState.value is com.castcharm.android.AppAuthState.NotLoggedIn) return@launch
 
                 playUri(
                     episodeId = request.episodeId,
@@ -480,7 +486,34 @@ class PlayerController(private val context: Context) {
         updatePlaybackStateFromController()
     }
 
+    // True when ExoPlayer's own timeline has a following item (a listen-in-order
+    // queue); the ViewModel then leaves advancing to the player.
+    fun hasNextMediaItem(): Boolean = mediaController?.hasNextMediaItem() == true
+
+    fun seekToNextMediaItem() {
+        mediaController?.seekToNextMediaItem()
+        updatePlaybackStateFromController()
+    }
+
+    // The timeline ran out. If the server still has a queue for the context it
+    // was told about, ask it what comes next. Lives here (app-scoped) rather
+    // than in a screen's ViewModel so it works with the player screen closed.
+    private fun advanceFromServerIfNeeded() {
+        if (hasNextMediaItem()) return
+        if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) return
+        scope.launch {
+            try {
+                val state = withContext(Dispatchers.IO) { CastCharmApp.apiClient.getApi().playerNext() }
+                val next = state.current_episode
+                if (next != null && next.status == "downloaded") playEpisode(next.id)
+            } catch (_: Exception) {
+                // No server context, or end of its queue.
+            }
+        }
+    }
+
     fun stopAndClear() {
+        playJob?.cancel()
         pendingPlaybackRequest = null
         val controller = mediaController ?: return
         controller.stop()
@@ -523,6 +556,7 @@ class PlayerController(private val context: Context) {
     // with an already-resolved future is the correct way to release an already-
     // obtained MediaController (vs. the future returned from buildAsync()).
     fun release() {
+        playJob?.cancel()
         pendingPlaybackRequest = null
         mediaController?.let {
             MediaController.releaseFuture(Futures.immediateFuture(it))
