@@ -20,9 +20,11 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.castcharm.android.CastCharmApp
-import com.castcharm.android.data.api.models.PlayedRequest
-import com.castcharm.android.data.api.models.ProgressRequest
+import com.castcharm.android.data.api.setPlayed
+import com.castcharm.android.data.api.models.clampProgressSeconds
+import com.castcharm.android.data.api.models.progressRequest
 import com.castcharm.android.data.db.AppDatabase
+import com.castcharm.android.download.LocalArtwork
 import com.castcharm.android.dataStore
 import com.castcharm.android.notifications.NewEpisodesNotifier
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +89,20 @@ class SyncWorker(
         runCatching { com.castcharm.android.download.StorageManager(applicationContext).reconcileOrphanFiles(api) }
             .onFailure { Log.w("SyncWorker", "Orphan file reconcile failed", it) }
         runCatching { com.castcharm.android.download.DownloadScheduler(applicationContext).kickQueue() }
+        // Piggyback: make sure every feed with episodes downloaded to this device
+        // also has its cover stored locally. New downloads store it as they
+        // finish, but anything already on the phone would otherwise never
+        // acquire one — and artwork is only of any use offline if it is fetched
+        // while there is still a network. Runs before the early return below,
+        // because having nothing to flush is the normal case, not a reason to
+        // skip this. Bounded by the number of feeds, and each call is a no-op
+        // once the file exists.
+        runCatching {
+            val downloaded = dao.getDownloadedEpisodesOnce()
+            downloaded.map { it.feed_id }.distinct()
+                .forEach { LocalArtwork.ensureFeed(applicationContext, it) }
+            downloaded.forEach { LocalArtwork.ensureEpisode(applicationContext, it.id) }
+        }.onFailure { Log.w("SyncWorker", "Cover art backfill failed", it) }
 
         // Fetch all episodes with pending sync flags set.
         val pending = dao.getPendingSyncEpisodes()
@@ -109,15 +125,17 @@ class SyncWorker(
                 // value that was sent. Rewriting the value here would revert any
                 // progress the player wrote while this flush was in flight.
                 if (episode.sync_pending_played) {
-                    api.setPlayed(episode.id, PlayedRequest(episode.played))
+                    // Set, not toggle: a flush replays a decision the phone already
+                    // made, so it has to be idempotent. Only the flag is cleared, and
+                    // only if the row still holds the value that was sent — rewriting
+                    // the value would revert progress the player wrote meanwhile.
+                    api.setPlayed(episode.id, episode.played)
                     dao.clearPendingPlayedIf(episode.id, episode.played)
                 }
 
                 if (episode.sync_pending_progress) {
-                    api.updateProgress(
-                        episode.id,
-                        ProgressRequest(episode.play_position_seconds)
-                    )
+                    val position = clampProgressSeconds(episode.play_position_seconds)
+                    api.updateProgress(episode.id, progressRequest(position))
                     dao.clearPendingProgressIf(episode.id, episode.play_position_seconds)
                 }
             } catch (e: retrofit2.HttpException) {

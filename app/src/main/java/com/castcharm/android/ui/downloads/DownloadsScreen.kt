@@ -79,6 +79,8 @@ import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.download.BandwidthTracker
 import com.castcharm.android.ui.settings.formatBytes
+import com.castcharm.android.ui.shared_components.ProvideSelectionActions
+import com.castcharm.android.ui.shared_components.SelectionAction
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
 import com.castcharm.android.ui.shared_components.EpisodeCard
 import com.castcharm.android.ui.shared_components.EpisodeDownloadActionOverride
@@ -113,6 +115,18 @@ fun DownloadsScreen(
 
     LaunchedEffect(isOfflineMode, refreshToken) {
         viewModel.onScreenVisible(isOfflineMode = isOfflineMode)
+    }
+
+    // Hands the bulk action to MainScaffold, which shows it in place of the tab bar.
+    ProvideSelectionActions(active = isSelectionMode) {
+        listOf(
+            SelectionAction(
+                icon = Icons.Default.Delete,
+                label = "Delete from device",
+                onClick = { showDeleteSelectedConfirm = true },
+                destructive = true
+            ),
+        )
     }
 
     if (showDeleteSelectedConfirm) {
@@ -214,11 +228,9 @@ fun DownloadsScreen(
                 },
                 actions = {
                     when {
-                        isSelectionMode -> {
-                            IconButton(onClick = { showDeleteSelectedConfirm = true }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete selected")
-                            }
-                        }
+                        // Bulk actions live in the SelectionActionBar at the bottom,
+                        // where they can carry text labels.
+                        isSelectionMode -> Unit
 
                         !isOfflineMode -> {
                             // Show a spinner alongside the menu while refreshing so the menu stays accessible.
@@ -456,6 +468,7 @@ fun DownloadsScreen(
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
                                         isSelected = isSelected,
+                                        selectionActive = isSelectionMode,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
                                             if (isSelectionMode) {
@@ -502,6 +515,7 @@ fun DownloadsScreen(
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
                                         isSelected = isSelected,
+                                        selectionActive = isSelectionMode,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
                                             if (isSelectionMode) {
@@ -551,7 +565,6 @@ fun DownloadsScreen(
                                     key = { "current_server_${it.episode.id}" }
                                 ) { item ->
                                     val episode = item.episode
-                                    val isSelected = uiState.selectedEpisodes.contains(episode.id)
                                     val overrideState = when (episode.status) {
                                         "downloading" -> EpisodeDownloadActionOverride.SERVER_DOWNLOADING
                                         "queued" -> EpisodeDownloadActionOverride.SERVER_QUEUED
@@ -559,23 +572,28 @@ fun DownloadsScreen(
                                         else -> EpisodeDownloadActionOverride.SAVE_TO_SERVER
                                     }
 
+                                    // Selection is deliberately disabled for this list.
+                                    // These episodes live on the server and have no
+                                    // local_path, and the only bulk action is "delete
+                                    // from this device" — deleteSelectedEpisodes()
+                                    // filters against getDownloadedEpisodesOnce(), so
+                                    // picking one here did nothing while the
+                                    // confirmation still counted it. Offering no
+                                    // checkbox is honest; a checkbox that leads
+                                    // nowhere is not.
                                     EpisodeCard(
                                         episode = episode,
                                         baseUrl = baseUrl,
                                         feedImageUrl = currentFeed?.custom_image_url ?: currentFeed?.image_url,
-                                        isSelected = isSelected,
+                                        isSelected = false,
+                                        selectionActive = false,
                                         expanded = !isSelectionMode && expandedEpisodeId == episode.id,
                                         onToggleExpand = {
-                                            if (isSelectionMode) {
-                                                viewModel.toggleEpisodeSelection(episode.id)
-                                            } else {
-                                                expandedEpisodeId = if (expandedEpisodeId == episode.id) null else episode.id
-                                            }
+                                            expandedEpisodeId = if (expandedEpisodeId == episode.id) null else episode.id
                                         },
                                         onLongPress = {
                                             if (!isSelectionMode) {
                                                 expandedEpisodeId = null
-                                                viewModel.toggleEpisodeSelection(episode.id)
                                             }
                                         },
                                         onPlay = { onPlayEpisode(episode.id) },

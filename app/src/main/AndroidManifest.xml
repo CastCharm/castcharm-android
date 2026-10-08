@@ -30,9 +30,19 @@
             android:name="com.google.android.gms.car.application.icon"
             android:resource="@mipmap/ic_launcher" />
 
+        <!--
+            configChanges: handle these in-process instead of letting Android
+            destroy and recreate the Activity. A recreation re-runs the startup
+            auth check (LaunchedEffect(Unit) -> refreshSessionState()), which resets
+            the session state machine to Checking and re-decides everything. That is
+            harmless on a good network and very visible on a bad one — connecting to
+            a car changes uiMode, so plugging in during a WiFi-to-cellular handover
+            restarted the whole auth flow at the worst possible moment.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="uiMode|orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|fontScale|density|locale|layoutDirection"
             android:theme="@style/Theme.CastCharm">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

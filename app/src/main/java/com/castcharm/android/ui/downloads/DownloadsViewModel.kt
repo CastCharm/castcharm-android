@@ -23,6 +23,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.ServerLimits
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.entities.DownloadEntity
 import com.castcharm.android.data.db.entities.EpisodeEntity
@@ -30,6 +31,7 @@ import com.castcharm.android.data.db.entities.FeedEntity
 import com.castcharm.android.data.repository.EpisodeRepository
 import com.castcharm.android.data.repository.toEntity
 import com.castcharm.android.download.DownloadScheduler
+import com.castcharm.android.download.StorageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -86,6 +88,7 @@ class DownloadsViewModel : ViewModel() {
     private val feedDao = db.feedDao()
     private val downloadDao = db.downloadDao()
     private val downloadScheduler = DownloadScheduler(CastCharmApp.instance)
+    private val storageManager = StorageManager(CastCharmApp.instance)
     private val workManager = WorkManager.getInstance(CastCharmApp.instance)
 
     private var phoneProgressRefreshJob: Job? = null
@@ -245,6 +248,11 @@ class DownloadsViewModel : ViewModel() {
                         local_size_bytes = null
                     )
                 )
+                // Artwork counts against the download quota, so it has to go with
+                // the episode it was kept for. Called after the row is cleared —
+                // it checks whether the feed has any downloads left before also
+                // dropping the feed cover.
+                storageManager.releaseArtworkFor(episode.id, episode.feed_id)
             }
         }
     }
@@ -267,6 +275,7 @@ class DownloadsViewModel : ViewModel() {
                         local_size_bytes = null
                     )
                 )
+                storageManager.releaseArtworkFor(ep.id, ep.feed_id)
             }
         }
     }
@@ -300,6 +309,7 @@ class DownloadsViewModel : ViewModel() {
                         local_size_bytes = null
                     )
                 )
+                storageManager.releaseArtworkFor(ep.id, ep.feed_id)
             }
             clearSelection()
         }
@@ -572,16 +582,16 @@ class DownloadsViewModel : ViewModel() {
             .toSet()
 
         val queuedResult = runCatching {
-            api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "queued", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadingResult = runCatching {
-            api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloading", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadedResult = runCatching {
-            api.getAllEpisodes(status = "downloaded", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloaded", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val failedResult = runCatching {
-            api.getAllEpisodes(status = "failed", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "failed", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
 
         // If every API call failed (server unreachable), bail before touching the DB.
@@ -653,10 +663,10 @@ class DownloadsViewModel : ViewModel() {
             .toSet()
 
         val queuedResult = runCatching {
-            api.getAllEpisodes(status = "queued", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "queued", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
         val downloadingResult = runCatching {
-            api.getAllEpisodes(status = "downloading", limit = 1000, includeHidden = true, order = "desc")
+            api.getAllEpisodes(status = "downloading", limit = ServerLimits.current.pageSize(1000), includeHidden = true, order = "desc")
         }
 
         // If both calls failed (server unreachable), bail — running the stale cleanup

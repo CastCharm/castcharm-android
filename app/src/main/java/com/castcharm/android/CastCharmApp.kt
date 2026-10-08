@@ -22,6 +22,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStore
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import com.castcharm.android.download.LocalArtworkInterceptor
 import com.castcharm.android.data.api.ApiClient
 import com.castcharm.android.data.api.AuthStore
 import com.castcharm.android.player.PlayerController
@@ -80,6 +81,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
             get() = appSessionManager.isOfflineMode
 
         fun enterOfflineMode() = appSessionManager.enterOfflineMode()
+        fun returnToLoginScreen() = appSessionManager.returnToLoginScreen()
         fun enterOnlineMode() = appSessionManager.enterOnlineMode()
         suspend fun refreshSessionState() = appSessionManager.refreshSessionState()
         suspend fun tryReconnectInPlace() = appSessionManager.tryReconnectInPlace()
@@ -113,6 +115,10 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         imageLoader = ImageLoader.Builder(this)
             .crossfade(200)
             .callFactory(AuthAwareCallFactory(apiClient))
+            // Prefers the copy stored beside downloaded episodes, so artwork is
+            // there with no server and no network — which is the state the phone
+            // is in whenever those downloads are the reason it is being used.
+            .components { add(LocalArtworkInterceptor(this@CastCharmApp)) }
             .build()
         // Register notification channels once at process start. Cheap no-op on
         // subsequent boots because the system tracks channel identity.

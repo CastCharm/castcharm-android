@@ -14,6 +14,15 @@ package com.castcharm.android
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,6 +57,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -56,12 +66,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -104,6 +116,9 @@ import com.castcharm.android.ui.settings.SettingsScreen
 import com.castcharm.android.ui.settings.SettingsViewModel
 import com.castcharm.android.ui.theme.CastCharmTheme
 import com.castcharm.android.ui.search.SearchScreen
+import com.castcharm.android.ui.shared_components.SelectionBarHost
+import com.castcharm.android.ui.shared_components.SelectionActionBar
+import com.castcharm.android.ui.shared_components.LocalSelectionBar
 import com.castcharm.android.ui.shared_components.ReconnectOutlinedButton
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodes
 import com.castcharm.android.ui.shared_components.navigateToFeedEpisodesFromDashboard
@@ -360,8 +375,22 @@ fun CastCharmNavigation() {
             AppAuthState.Checking -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(16.dp))
+                        // The launcher art with the progress ring drawn around it,
+                        // rather than a bare spinner. This is the first frame of a
+                        // cold start and it can sit here for a couple of seconds on a
+                        // slow LAN, so it may as well say which app is starting.
+                        Box(contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(96.dp),
+                                strokeWidth = 3.dp
+                            )
+                            Image(
+                                painter = painterResource(id = R.drawable.icon_no_bg),
+                                contentDescription = null,
+                                modifier = Modifier.size(60.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(20.dp))
                         Text("Connecting...", style = MaterialTheme.typography.bodyLarge)
                     }
                 }
@@ -388,11 +417,13 @@ fun CastCharmNavigation() {
                         hideOfflinePrompt()
                         CastCharmApp.enterOfflineMode()
                     },
+                    // Non-destructive: returns to the login screen but keeps this
+                    // device's API key and cookies. Signing out for real lives in
+                    // Settings (onChangeServer) — backing out of a temporary network
+                    // problem should not cost the user their credentials.
                     onBackToLogin = {
-                        scope.launch {
-                            hideOfflinePrompt()
-                            CastCharmApp.logoutAndForgetSession()
-                        }
+                        hideOfflinePrompt()
+                        CastCharmApp.returnToLoginScreen()
                     }
                 )
             }
@@ -542,9 +573,86 @@ fun DownloadIconWithProgress(isDownloading: Boolean) {
     }
 }
 
+/**
+ * Runs [onResume] every time the screen resumes, including the first time it is
+ * shown. This is the *single* place a screen's data load is triggered from.
+ *
+ * Screens used to load twice on arrival: once from the ViewModel's init block and
+ * again from this observer. Two loads land within milliseconds of each other, and
+ * because each flips isRefreshing, the pull-to-refresh indicator would appear to
+ * fire twice when navigating to a tab. The ViewModels no longer self-load, so
+ * arriving at a screen produces exactly one load — from here.
+ *
+ * Relying on this for the first load is safe because a destination always reaches
+ * RESUMED, and LifecycleRegistry replays the upward events into an observer that
+ * registers when the lifecycle is already RESUMED.
+ *
+ * Keyed on the lifecycle alone. Do not add changing values such as isOfflineMode
+ * to the key — re-keying disposes and re-registers the observer, which replays
+ * ON_RESUME and fires a spurious extra load. Read such values through
+ * rememberUpdatedState inside [onResume] instead.
+ */
+@Composable
+private fun OnScreenResumed(
+    lifecycle: Lifecycle,
+    onResume: () -> Unit,
+) {
+    val currentOnResume by rememberUpdatedState(onResume)
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) currentOnResume()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
+/**
+ * Runs [onOnline] when the app transitions from offline back to online while this
+ * screen is showing.
+ *
+ * Screens whose resume handler is gated on being online would otherwise sit on
+ * cached data until the user navigated away and back. The previous code got this
+ * behaviour by accident — isOfflineMode was part of a DisposableEffect key, so
+ * flipping it re-registered a lifecycle observer and replayed ON_RESUME. That
+ * replay was the same mechanism causing spurious double-refreshes, so the
+ * transition is now handled explicitly instead.
+ */
+@Composable
+private fun OnReturnedOnline(isOfflineMode: Boolean, onOnline: () -> Unit) {
+    val currentOnOnline by rememberUpdatedState(onOnline)
+    var wasOffline by remember { mutableStateOf(isOfflineMode) }
+    LaunchedEffect(isOfflineMode) {
+        if (wasOffline && !isOfflineMode) currentOnOnline()
+        wasOffline = isOfflineMode
+    }
+}
+
 // Main scaffold: NavHost + bottom nav bar + mini player bar. Shown when the user
-// is fully logged in. Owns the per-screen ViewModel lifecycle via DisposableEffect
-// observers that trigger refreshes on ON_RESUME.
+// is fully logged in. Each screen's data load is triggered from exactly one place,
+// OnScreenResumed, rather than from both the ViewModel's init and a lifecycle
+// observer — see the note on that function.
+// Duration of the fade between navigation destinations.
+//
+// navigation-compose defaults to 700 ms, which felt like waiting. Dropping it to
+// 160 ms felt worse — not quick, but abrupt: a fade that short is about ten
+// frames, so any hitch while the incoming screen composes eats a visible fraction
+// of it and the whole thing reads as a stutter. 500 ms is long enough that the
+// motion carries through a dropped frame or two, which is what "smooth" actually
+// depends on here, and it costs nothing on slower hardware because a crossfade is
+// just alpha.
+private const val NAV_TRANSITION_MS = 500
+
+// The player's slide. Kept on tween's default FastOutSlowIn easing, which is what
+// that curve is actually for — it gives the sheet a sense of weight, starting and
+// settling rather than moving at a constant rate. Slightly quicker than the fade
+// because travel reads as slower than a crossfade of the same duration.
+private const val PLAYER_TRANSITION_MS = 380
+
+/** True when this back-stack entry is the full-screen player. */
+private val androidx.navigation.NavBackStackEntry.isPlayerRoute: Boolean
+    get() = destination.route == "player"
+
 @Composable
 fun MainScaffold(
     navController: androidx.navigation.NavHostController,
@@ -566,7 +674,10 @@ fun MainScaffold(
     val snackbarHostState = remember { SnackbarHostState() }
     // Integer token incremented every time the Downloads tab becomes visible,
     // used to trigger a fresh DownloadsViewModel observation when re-entering.
-    var downloadsRefreshToken by remember { mutableIntStateOf(0) }
+    // Constant now — DownloadsScreen reloads via its own LaunchedEffect when the
+    // composable enters composition. Kept as a parameter so a future caller can
+    // still force a reload by changing it.
+    val downloadsRefreshToken by remember { mutableIntStateOf(0) }
 
     // Forward ShowMessage events from the player (e.g., "Cannot stream offline")
     // to the snackbar host so they appear over the current screen.
@@ -605,6 +716,12 @@ fun MainScaffold(
                 !playbackUiState.title.isNullOrBlank() &&
                 !isOnPlayerRoute
 
+    // Screens inside the NavHost publish their multi-select actions here via
+    // ProvideSelectionActions; the bottom bar below renders them in place of the
+    // tab bar while a selection is active.
+    val selectionBarHost = remember { SelectionBarHost() }
+
+    CompositionLocalProvider(LocalSelectionBar provides selectionBarHost) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -615,25 +732,66 @@ fun MainScaffold(
                 NavHost(
                     navController = navController,
                     startDestination = "dashboard",
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    // navigation-compose defaults to a 700 ms crossfade on every
+                    // destination change. That is most of a second before a screen
+                    // settles — it reads as the app thinking rather than as motion,
+                    // and it applies to every tab switch, every feed opened, and
+                    // opening and closing the player. A short fade keeps the sense
+                    // of a transition without making the user wait for it.
+                    // Two kinds of motion, chosen per destination.
+                    //
+                    // The player behaves like a sheet drawn up over the app, so it
+                    // moves through space — and the screen underneath deliberately
+                    // does nothing, because something sliding over a surface that
+                    // is simultaneously fading reads as two unrelated animations.
+                    //
+                    // Everything else crossfades. Those are lateral moves between
+                    // peers, where there is no "direction" to travel in, and alpha
+                    // uses LinearEasing: tween() defaults to FastOutSlowIn, which
+                    // is right for movement but makes a fade appear to stall at
+                    // each end and rush the middle.
+                    enterTransition = {
+                        if (targetState.isPlayerRoute) {
+                            slideInVertically(
+                                initialOffsetY = { it },
+                                animationSpec = tween(PLAYER_TRANSITION_MS),
+                            )
+                        } else {
+                            fadeIn(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                        }
+                    },
+                    exitTransition = {
+                        if (targetState.isPlayerRoute) ExitTransition.None
+                        else fadeOut(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                    },
+                    popEnterTransition = {
+                        if (initialState.isPlayerRoute) EnterTransition.None
+                        else fadeIn(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                    },
+                    popExitTransition = {
+                        if (initialState.isPlayerRoute) {
+                            slideOutVertically(
+                                targetOffsetY = { it },
+                                animationSpec = tween(PLAYER_TRANSITION_MS),
+                            )
+                        } else {
+                            fadeOut(tween(NAV_TRANSITION_MS, easing = LinearEasing))
+                        }
+                    },
                 ) {
                     // ---- Dashboard route -------------------------------------
-                    // DisposableEffect observes the back-stack entry's lifecycle
-                    // so refresh() is called when the user returns from another tab
-                    // or navigates back from the episode list. The isOfflineMode
-                    // guard prevents network calls while offline.
+                    // The ViewModel collects cached data from the DB in its init;
+                    // OnScreenResumed triggers the server pull, both on first arrival
+                    // and when returning from another tab or the episode list.
                     composable("dashboard") { backStackEntry ->
                         val dashVm: DashboardViewModel = viewModel()
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    dashVm.refresh()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        val offlineNowDash by rememberUpdatedState(isOfflineMode)
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNowDash) dashVm.refresh()
                         }
+                        OnReturnedOnline(isOfflineMode) { dashVm.refresh() }
 
                         DashboardScreen(
                             viewModel = dashVm,
@@ -665,16 +823,12 @@ fun MainScaffold(
 
                     composable("feeds") { backStackEntry ->
                         val feedVm: FeedListViewModel = viewModel()
+                        val offlineNow by rememberUpdatedState(isOfflineMode)
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (!isOfflineMode && event == Lifecycle.Event.ON_RESUME) {
-                                    feedVm.refreshFeeds()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNow) feedVm.refreshFeeds()
                         }
+                        OnReturnedOnline(isOfflineMode) { feedVm.refreshFeeds() }
 
                         FeedListScreen(
                             viewModel = feedVm,
@@ -695,19 +849,18 @@ fun MainScaffold(
 
                     // ---- Downloads route -------------------------------------
                     // No ViewModel at this level — DownloadsScreen manages its own
-                    // ViewModel internally. The refreshToken increment on ON_RESUME
-                    // is passed down to DownloadsScreen so it can re-trigger its
-                    // internal observation when the tab becomes active.
-                    composable("downloads") { backStackEntry ->
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    downloadsRefreshToken++
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                    // ViewModel internally. The refreshToken increment is passed down
+                    // to DownloadsScreen so it can re-trigger its internal observation
+                    // when the user comes back to the tab. DownloadsScreen already
+                    // loads once on first composition via LaunchedEffect(refreshToken),
+                    // so the token must not be bumped on that first pass.
+                    composable("downloads") { _ ->
+                        // No ON_RESUME observer here: DownloadsScreen's own
+                        // LaunchedEffect(isOfflineMode, refreshToken) already runs
+                        // when the composable enters composition, which happens on
+                        // every navigation to this tab. Bumping the token from a
+                        // lifecycle observer as well produced a second load a few
+                        // milliseconds after the first.
 
                         DownloadsScreen(
                             refreshToken = downloadsRefreshToken,
@@ -723,12 +876,11 @@ fun MainScaffold(
                         val settingsVm = viewModel<SettingsViewModel> { SettingsViewModel(storageManager) }
                         val lifecycleOwner = LocalLifecycleOwner.current
 
-                        DisposableEffect(lifecycleOwner) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) settingsVm.reload()
-                            }
-                            lifecycleOwner.lifecycle.addObserver(observer)
-                            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                        // Activity lifecycle, not the back-stack entry: this reloads
+                        // storage figures when the app returns from the background.
+                        // SettingsViewModel already loads in its init block.
+                        OnScreenResumed(lifecycleOwner.lifecycle) {
+                            settingsVm.reload()
                         }
 
                         SettingsScreen(
@@ -765,15 +917,11 @@ fun MainScaffold(
                             EpisodeListViewModel(feedId)
                         }
 
-                        DisposableEffect(backStackEntry.lifecycle, isOfflineMode) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (!isOfflineMode && event == Lifecycle.Event.ON_RESUME) {
-                                    vm.reloadFromDb()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
+                        val offlineNow by rememberUpdatedState(isOfflineMode)
+                        OnScreenResumed(backStackEntry.lifecycle) {
+                            if (!offlineNow) vm.refresh()
                         }
+                        OnReturnedOnline(isOfflineMode) { vm.refresh() }
 
                         EpisodeListScreen(
                             feedId = feedId,
@@ -799,15 +947,7 @@ fun MainScaffold(
                     composable("playlists") { backStackEntry ->
                         val playlistsVm: PlaylistsViewModel = viewModel()
 
-                        DisposableEffect(backStackEntry.lifecycle) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    playlistsVm.loadPlaylists()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                        OnScreenResumed(backStackEntry.lifecycle) { playlistsVm.loadPlaylists() }
 
                         PlaylistsScreen(
                             viewModel = playlistsVm,
@@ -835,15 +975,7 @@ fun MainScaffold(
                             PlaylistDetailViewModel(playlistId)
                         }
 
-                        DisposableEffect(backStackEntry.lifecycle) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    vm.loadPlaylist()
-                                }
-                            }
-                            backStackEntry.lifecycle.addObserver(observer)
-                            onDispose { backStackEntry.lifecycle.removeObserver(observer) }
-                        }
+                        OnScreenResumed(backStackEntry.lifecycle) { vm.loadPlaylist() }
 
                         PlaylistDetailScreen(
                             playlistId = playlistId,
@@ -916,6 +1048,15 @@ fun MainScaffold(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
 
+                    // While a screen has bulk actions to offer, they take over this
+                    // bar rather than appearing as a second bar stacked above it.
+                    // Leaving tab navigation live during multi-select would let the
+                    // user wander off mid-selection anyway, and the top bar keeps an
+                    // X to exit, so nothing becomes unreachable.
+                    val selectionActions = selectionBarHost.actions
+                    if (selectionActions.isNotEmpty()) {
+                        SelectionActionBar(actions = selectionActions)
+                    } else {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                         bottomNavItems.filter { screen ->
                             screen !is Screen.Playlists || enablePlaylists
@@ -970,6 +1111,7 @@ fun MainScaffold(
                             )
                         }
                     }
+                    }
                 }
             }
         }
@@ -980,6 +1122,7 @@ fun MainScaffold(
                 .align(Alignment.BottomCenter)
                 .padding(bottom = if (showBottomBar) 88.dp else 24.dp)
         )
+    }
     }
 }
 

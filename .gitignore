@@ -40,3 +40,5 @@ launch-DHU.bat
 
 # Android Studio signed-build output (baseline profiles, metadata; the .apk/.aab are already ignored)
 app/release/
+# Kotlin compile daemon session files
+.kotlin/

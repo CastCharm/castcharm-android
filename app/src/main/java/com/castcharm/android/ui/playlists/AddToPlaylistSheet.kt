@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.castcharm.android.CastCharmApp
 import com.castcharm.android.data.api.models.AddToPlaylistRequest
+import com.castcharm.android.data.api.models.PLAYLIST_NAME_MAX
 import com.castcharm.android.data.api.models.CreatePlaylistRequest
 import com.castcharm.android.data.api.models.PlaylistOut
 import kotlinx.coroutines.launch
@@ -205,7 +206,7 @@ fun AddToPlaylistSheet(
                     } else {
                         OutlinedTextField(
                             value = newName,
-                            onValueChange = { newName = it },
+                            onValueChange = { newName = it.take(PLAYLIST_NAME_MAX) },
                             label = { Text("Playlist name") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()

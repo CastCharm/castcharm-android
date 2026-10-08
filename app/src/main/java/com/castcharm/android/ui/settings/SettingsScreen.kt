@@ -113,10 +113,9 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
 
     private val downloadScheduler = DownloadScheduler(CastCharmApp.instance)
 
-    init {
-        loadSettings()
-    }
-
+    // No load here on purpose. The screen's ON_RESUME observer (OnScreenResumed in
+    // MainActivity) is the single trigger, so arriving at Settings recalculates the
+    // storage figures exactly once instead of twice.
     fun reload() = loadSettings()
 
     private fun loadSettings() {

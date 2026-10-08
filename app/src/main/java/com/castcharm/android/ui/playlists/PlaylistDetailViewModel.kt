@@ -34,9 +34,8 @@ class PlaylistDetailViewModel(private val playlistId: Int) : ViewModel() {
     private val db = AppDatabase.getDatabase(CastCharmApp.instance)
     private val downloadScheduler = DownloadScheduler(CastCharmApp.instance)
 
-    init {
-        loadPlaylist()
-    }
+    // No load here on purpose — the screen's ON_RESUME observer is the single
+    // trigger. See the note in PlaylistsViewModel.
 
     fun loadPlaylist() {
         if (!CastCharmApp.apiClient.isInitialized) {

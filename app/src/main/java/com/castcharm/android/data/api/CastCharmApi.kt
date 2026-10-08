@@ -87,6 +87,35 @@ interface CastCharmApi {
         @Query("order") order: String = "desc"
     ): List<EpisodeOut>
 
+    // Fetches a specific set of episodes, comma-separated, max 500 per call.
+    // This is how the windowed list fills itself in: it knows exactly which rows
+    // are on screen and asks for those, rather than an offset that only lines up
+    // if its idea of the feed's ordering matches the server's.
+    @GET("api/feeds/{feed_id}/episodes")
+    suspend fun getEpisodesByIds(
+        @Path("feed_id") feedId: Int,
+        @Query("ids") ids: String,
+        @Query("include_hidden") includeHidden: Boolean = false
+    ): List<EpisodeOut>
+
+    // The feed's episode ids in display order — see EpisodeIndexOut. Offsets
+    // into this list address getEpisodes() pages exactly, because the server
+    // builds both from the same filter and ORDER BY.
+    //
+    // filter is "all", "unplayed" or "in_progress". There is deliberately no
+    // "downloaded": that means "on this phone", which only the local DB knows.
+    //
+    // Added after the Android app shipped, so a server that predates it answers
+    // 404 — EpisodeRepository treats that as "no index available" and the list
+    // falls back to sequential loading rather than failing.
+    @GET("api/feeds/{feed_id}/episode-index")
+    suspend fun getEpisodeIndex(
+        @Path("feed_id") feedId: Int,
+        @Query("filter") filter: String = "all",
+        @Query("include_hidden") includeHidden: Boolean = false,
+        @Query("order") order: String = "desc"
+    ): EpisodeIndexOut
+
     // Returns raw JPEG bytes for the feed's cover artwork.
     @GET("api/feeds/{feed_id}/cover.jpg")
     suspend fun getFeedCoverImage(@Path("feed_id") feedId: Int): ResponseBody
@@ -104,6 +133,17 @@ interface CastCharmApi {
     @POST("api/feeds/{feed_id}/refresh")
     suspend fun refreshFeed(@Path("feed_id") feedId: Int)
 
+
+    // Removes a podcast and all of its episode records from the SERVER, for every
+    // client. deleteFiles additionally purges the downloaded audio, sidecar XML and
+    // cover art from the server's disk; without it those files are left behind.
+    // There is no undo, and nothing about this is local to the phone.
+    @DELETE("api/feeds/{feed_id}")
+    suspend fun deleteFeed(
+        @Path("feed_id") feedId: Int,
+        @Query("delete_files") deleteFiles: Boolean = false,
+    )
+
     // ---- Episodes -----------------------------------------------------------
     // Cross-feed episode list. status filter is used by the server-side download
     // queue (e.g., status="downloading") when monitoring active server downloads.
@@ -119,6 +159,11 @@ interface CastCharmApi {
 
     @GET("api/episodes/{episode_id}")
     suspend fun getEpisode(@Path("episode_id") episodeId: Int): EpisodeOut
+
+    // One action, many episodes, one request. Used by multi-select so marking a
+    // whole feed played is a handful of calls rather than one per episode.
+    @POST("api/episodes/bulk")
+    suspend fun bulkEpisodeAction(@Body body: BulkEpisodeRequest): BulkEpisodeResult
 
     // @Streaming prevents Retrofit from buffering the entire response body in
     // memory before returning — essential for large audio files. DownloadWorker
@@ -148,16 +193,12 @@ interface CastCharmApi {
     )
 
     // ---- Played status ------------------------------------------------------
-    // Toggles played/unplayed on the server. The server determines the new state
-    // based on the current state, so no request body is needed.
-    @POST("api/episodes/{episode_id}/played")
-    suspend fun togglePlayed(@Path("episode_id") episodeId: Int)
-
-    // Sets played/unplayed explicitly. Safe to repeat — what every automatic
-    // path (end of episode, threshold, offline flush) uses so a second call can
-    // never flip an episode back.
-    @POST("api/episodes/{episode_id}/played")
-    suspend fun setPlayed(@Path("episode_id") episodeId: Int, @Body body: PlayedRequest)
+    // There is deliberately no binding for POST api/episodes/{id}/played. That
+    // endpoint *toggles*, and no caller in this app ever wanted that: every one
+    // of them had already decided on a target state and used a toggle to reach
+    // it, which only lands on the right answer while the server's copy agrees
+    // with the phone's. A flush that ran twice, or that raced a change made on
+    // another device, drove the state the wrong way. Use setPlayed() below.
 
     // ---- Hide / unhide ------------------------------------------------------
     // Hidden episodes are excluded from the default episode list and counts.
@@ -183,8 +224,9 @@ interface CastCharmApi {
     @GET("api/status")
     suspend fun getStatus(): AppStatus
 
-    // Request ceilings the server enforces (see ServerLimits). Older servers
-    // return 404; ServerLimits falls back to defaults in that case.
+    // The request ceilings this server enforces. Read through ServerLimits, which
+    // caches the answer and falls back to conservative defaults for a server too
+    // old to have the endpoint.
     @GET("api/limits")
     suspend fun getLimits(): LimitsOut
 
@@ -246,4 +288,25 @@ interface CastCharmApi {
 
     @POST("api/player/prev")
     suspend fun playerPrev(): PlayerStateOut
+}
+
+/**
+ * Sets an episode's played state to an absolute value.
+ *
+ * Routed through the bulk endpoint because its mark_played / mark_unplayed
+ * actions assign rather than flip, which makes this safe to repeat: the phone
+ * decides the target state once, and sending it again — on a retry, a second
+ * flush, or after another device has already made the same change — converges
+ * on that state instead of oscillating around it.
+ *
+ * Every played-state write in the app goes through here. The single-episode
+ * toggle endpoint is intentionally not bound; see the note on it above.
+ */
+suspend fun CastCharmApi.setPlayed(episodeId: Int, played: Boolean) {
+    bulkEpisodeAction(
+        BulkEpisodeRequest(
+            episode_ids = listOf(episodeId),
+            action = if (played) "mark_played" else "mark_unplayed"
+        )
+    )
 }

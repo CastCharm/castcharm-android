@@ -42,6 +42,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.castcharm.android.data.api.models.PLAYLIST_DESC_MAX
+import com.castcharm.android.data.api.models.PLAYLIST_NAME_MAX
 import com.castcharm.android.data.api.models.PlaylistOut
 import com.castcharm.android.ui.shared_components.ConsumeSnackbarMessage
 
@@ -229,14 +231,17 @@ private fun CreatePlaylistDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it },
+                    // Capped to the server's limit (PlaylistCreate in
+                    // app/schemas.py) so a long paste is trimmed rather than
+                    // rejected when the user hits Create.
+                    onValueChange = { name = it.take(PLAYLIST_NAME_MAX) },
                     label = { Text("Name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = description,
-                    onValueChange = { description = it },
+                    onValueChange = { description = it.take(PLAYLIST_DESC_MAX) },
                     label = { Text("Description (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()

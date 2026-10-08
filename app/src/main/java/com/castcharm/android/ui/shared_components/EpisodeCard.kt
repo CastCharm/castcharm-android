@@ -1,9 +1,9 @@
 package com.castcharm.android.ui.shared_components
 
 // EpisodeCard is the shared expandable episode row used in EpisodeListScreen,
-// DashboardScreen, and DownloadsScreen. It handles the full episode interaction
+// DownloadsScreen, and PlaylistDetailScreen. It handles the full episode interaction
 // surface: artwork, title, metadata row (date / duration / download indicator /
-// resume badge), a 2dp progress bar, and an animated action panel that expands on
+// playback state), a 2dp progress bar, and an animated action panel that expands on
 // tap to show Play / Mark Played / download action buttons and the episode description.
 //
 // The download state is abstracted through EpisodeDownloadActionOverride so callers
@@ -14,7 +14,10 @@ package com.castcharm.android.ui.shared_components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,17 +25,19 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -44,7 +49,6 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -61,7 +65,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
@@ -112,7 +119,13 @@ fun EpisodeCard(
     downloadActionOverride: EpisodeDownloadActionOverride? = null,
     onAddToPlaylist: (() -> Unit)? = null,
     isInPlaylist: Boolean = false,
-    enablePlaylists: Boolean = true
+    enablePlaylists: Boolean = true,
+    // True whenever multi-select is active, regardless of whether *this* row is
+    // picked. Lets unselected rows show an empty checkbox, so the distinction is
+    // between two obviously different marks rather than a background tint the user
+    // has to hunt for. Appended rather than slotted next to isSelected so adding it
+    // did not shuffle the positional argument order of a component with six callers.
+    selectionActive: Boolean = false,
 ) {
     // Resolve artwork URL through a four-level fallback chain:
     // 1. Episode-specific custom image (set by the user or override)
@@ -144,8 +157,11 @@ fun EpisodeCard(
         else -> EpisodeDownloadActionOverride.SAVE_TO_SERVER
     }
 
-    // The card background changes to primaryContainer when the episode is in
-    // multi-select mode (isSelected=true), giving a clear selection highlight.
+    // Selection is signalled three ways at once, so it survives any theme and does
+    // not depend on telling two similar background colours apart: a check badge over
+    // the artwork (see below), an accent border, and a raised elevation. The tinted
+    // container alone used to be the only cue, and in several of the darker themes
+    // primaryContainer sits very close to the card surface.
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -154,6 +170,16 @@ fun EpisodeCard(
             CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
         } else {
             CardDefaults.cardColors()
+        },
+        border = if (isSelected) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
+        elevation = if (isSelected) {
+            CardDefaults.cardElevation(defaultElevation = 6.dp)
+        } else {
+            CardDefaults.cardElevation()
         }
     ) {
         Column {
@@ -168,13 +194,78 @@ fun EpisodeCard(
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                PlaceholderArtwork(
-                    imageUrl = imageUrl,
-                    contentDescription = episode.title,
-                    modifier = Modifier.size(48.dp),
-                    contentScale = ContentScale.Crop,
-                    cornerRadiusDp = 6
-                )
+                // While multi-select is active the artwork doubles as the checkbox.
+                // Every row gets a mark — filled tick or empty ring — so "selected"
+                // and "not selected" differ by shape, which stays legible over any
+                // cover art and in any theme.
+                Box(modifier = Modifier.size(48.dp)) {
+                    PlaceholderArtwork(
+                        imageUrl = imageUrl,
+                        contentDescription = episode.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        cornerRadiusDp = 6
+                    )
+
+                    if (selectionActive) {
+                        // Both marks sit on an OPAQUE disc. Anything translucent
+                        // composites against whatever cover art happens to be
+                        // underneath, so its contrast is unknowable at author time —
+                        // a translucent accent wash with a white tick measured
+                        // 1.2:1 on Cyberpunk over light artwork, i.e. invisible,
+                        // which is the very problem this indicator exists to solve.
+                        if (isSelected) {
+                            // Accent wash over the whole thumbnail so picked rows are
+                            // obvious when scanning, plus a solid primary disc that
+                            // gives the tick a known background to sit on.
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                                    )
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                // The theme computes onPrimary from the primary's
+                                // luminance for exactly this purpose, so it is
+                                // legible on every one of the shipped themes.
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(18.dp)
+                            )
+                        } else {
+                            // Unselected rows keep their artwork — washing out every
+                            // thumbnail the moment multi-select opens makes the list
+                            // look broken. Only the ring gets a backdrop.
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                            )
+                            Icon(
+                                imageVector = Icons.Default.RadioButtonUnchecked,
+                                contentDescription = "Not selected",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(26.dp)
+                            )
+                        }
+                    }
+                }
 
                 Spacer(Modifier.size(12.dp))
 
@@ -198,7 +289,7 @@ fun EpisodeCard(
                         }
                     )
 
-                    // Metadata row: date | duration | download state icon | resume badge.
+                    // Metadata row: date | playback state | duration | download state.
                     // Each element is only rendered when the data is available (e.g.,
                     // duration is nullable, date may be absent for manually added episodes).
                     Row(
@@ -211,6 +302,46 @@ fun EpisodeCard(
                                 text = dateStr,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        // Playback state, sitting right after the date. This is the
+                        // single place playback status is stated. It used to be carried
+                        // by the accent progress bar along the bottom edge of the card,
+                        // which multi-select then wiped out — the selected-row border
+                        // runs along that same edge in the same accent colour, so the
+                        // moment you started picking rows you could no longer tell what
+                        // you had already heard. An icon inside the row is unaffected
+                        // by the border and reads the same in every theme.
+                        //
+                        // The three states are one glyph in three fills — empty ring,
+                        // part-filled, solid — so they are read as points on a single
+                        // scale. Part-played used to be a separate "Resume" pill sat
+                        // beside an empty ring, which said "unplayed" and "half played"
+                        // simultaneously in two unrelated visual languages.
+                        //
+                        // When the empty ring is worth drawing: only for episodes that
+                        // are actually to hand, so it means "downloaded, not listened
+                        // yet" rather than putting a marker on every row in the list.
+                        // Started and played episodes always get their mark, since the
+                        // fill is the only thing now carrying that information.
+                        val isDownloaded =
+                            actionState == EpisodeDownloadActionOverride.ON_PHONE ||
+                                actionState == EpisodeDownloadActionOverride.SAVE_TO_PHONE
+                        val isStarted = episode.play_position_seconds > 0 && !episode.played
+                        if (episode.played || isStarted || isDownloaded) {
+                            PlaybackStateIcon(
+                                played = episode.played,
+                                progress = when {
+                                    !isStarted -> 0f
+                                    episode.duration != null && episode.duration > 0 ->
+                                        episode.play_position_seconds.toFloat() / episode.duration
+                                    // Started, but the feed never supplied a duration,
+                                    // so there is no fraction to be had. Half is the
+                                    // honest reading of "somewhere in the middle".
+                                    else -> 0.5f
+                                },
+                                modifier = Modifier.size(14.dp)
                             )
                         }
 
@@ -235,8 +366,13 @@ fun EpisodeCard(
                             }
 
                             EpisodeDownloadActionOverride.SAVE_TO_PHONE -> {
+                                // Deliberately not DownloadDone: that glyph is a bare
+                                // tick over a line, and the played marker a few pixels
+                                // to the left is now the row's tick. Two checkmarks
+                                // meaning different things in one row is exactly the
+                                // confusion this pass is undoing.
                                 Icon(
-                                    Icons.Default.DownloadDone,
+                                    Icons.Default.Cloud,
                                     contentDescription = "Downloaded to Server",
                                     modifier = Modifier.size(14.dp),
                                     tint = MaterialTheme.colorScheme.primary
@@ -301,18 +437,6 @@ fun EpisodeCard(
                                 )
                             }
                         }
-
-                        // "Resume" badge shown when the episode has been partially played
-                        // but is not yet marked as done. Helps the user quickly identify
-                        // in-progress episodes in a long list.
-                        if (episode.play_position_seconds > 0 && !episode.played) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                            ) {
-                                Text("Resume")
-                            }
-                        }
                     }
                 }
 
@@ -326,9 +450,12 @@ fun EpisodeCard(
             }
 
             // 2dp playback progress bar at the bottom of the collapsed header row.
-            // Only shown when the user has started listening but hasn't finished.
+            // Only shown when the user has started listening but hasn't finished:
+            // once played, a full-width accent bar along the bottom edge reads as a
+            // highlight rather than as progress, and it competes with the selected-row
+            // border. The tick in the metadata row states played instead.
             // coerceIn guards against server data where position > duration.
-            if (episode.play_position_seconds > 0 && episode.duration != null && episode.duration > 0) {
+            if (!episode.played && episode.play_position_seconds > 0 && episode.duration != null && episode.duration > 0) {
                 LinearProgressIndicator(
                     progress = { (episode.play_position_seconds.toFloat() / episode.duration).coerceIn(0f, 1f) },
                     modifier = Modifier
@@ -366,11 +493,16 @@ fun EpisodeCard(
                             onClick = onPlay
                         )
 
-                        // Toggle played/unplayed. The icon and tint switch to signal the
-                        // current state — filled CheckCircle + primary colour when played.
+                        // Toggle played/unplayed. A bare tick in both directions, tinted
+                        // to say which way it goes: accent while played (tap to undo),
+                        // muted while unplayed (tap to mark). The ringed glyphs are
+                        // reserved for the status markers in the metadata row above —
+                        // reusing them on an action button made the button look like a
+                        // state readout, which is why it read as "Played" rather than
+                        // as something you could press.
                         EpisodeActionButton(
-                            icon = if (episode.played) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            label = if (episode.played) "Played" else "Mark Played",
+                            icon = Icons.Default.Check,
+                            label = if (episode.played) "Mark Unplayed" else "Mark Played",
                             tint = if (episode.played) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             onClick = onTogglePlayedStatus
                         )
@@ -495,8 +627,16 @@ fun EpisodeCard(
     }
 }
 
+/**
+ * Stand-in for an episode card whose content is not loaded yet.
+ *
+ * [showSpinner] is on when the whole screen is waiting for its first data. It is
+ * off for the placeholder rows inside a loaded list: a long feed puts a row here
+ * for every episode it has not fetched, and a fling past a few hundred of them
+ * with a spinner in each is a strobe rather than a hint that anything is coming.
+ */
 @Composable
-fun EpisodeCardSkeleton() {
+fun EpisodeCardSkeleton(showSpinner: Boolean = true) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -512,12 +652,14 @@ fun EpisodeCardSkeleton() {
                     .clip(RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .size(18.dp)
-                        .semantics { contentDescription = "Loading" },
-                    strokeWidth = 2.dp
-                )
+                if (showSpinner) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .semantics { contentDescription = "Loading" },
+                        strokeWidth = 2.dp
+                    )
+                }
             }
 
             Spacer(Modifier.size(12.dp))
@@ -541,6 +683,70 @@ fun EpisodeCardSkeleton() {
             Spacer(Modifier.size(12.dp))
             Box(modifier = Modifier.size(20.dp))
         }
+    }
+}
+
+/**
+ * Playback state as one glyph in three fills: an empty ring (not started), a ring
+ * filled clockwise from the top (part heard), and a solid disc (played).
+ *
+ * Drawn rather than assembled from Material glyphs because the set has to be one
+ * shape at three fills to read as a scale, and the icon font has no half-filled
+ * circle whose metaphor is progress — the near misses are all about brightness or
+ * contrast, which is a different idea wearing the same outline.
+ *
+ * [progress] is the fraction heard and is only consulted when [played] is false;
+ * a played episode is a full disc regardless of where its position marker sits.
+ */
+@Composable
+private fun PlaybackStateIcon(
+    played: Boolean,
+    progress: Float,
+    modifier: Modifier = Modifier
+) {
+    val started = !played && progress > 0f
+    val tint = if (played || started) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val description = when {
+        played -> "Played"
+        started -> "Partly played"
+        else -> "Not played"
+    }
+
+    Canvas(
+        modifier = modifier.semantics { contentDescription = description }
+    ) {
+        val strokeWidth = 1.5.dp.toPx()
+        val diameter = size.minDimension - strokeWidth
+        val radius = diameter / 2f
+
+        if (played) {
+            drawCircle(color = tint, radius = radius)
+            return@Canvas
+        }
+
+        if (started) {
+            // The wedge is a state indicator, not a gauge, so its sweep is held
+            // away from both ends: a thirty-second start still has to look
+            // different from untouched, and an episode with two minutes left must
+            // not read as finished. The exact fraction is on the progress bar
+            // along the bottom of the row, which is where precision belongs.
+            drawArc(
+                color = tint,
+                startAngle = -90f,
+                sweepAngle = 360f * progress.coerceIn(0.12f, 0.9f),
+                useCenter = true,
+                topLeft = Offset(
+                    (size.width - diameter) / 2f,
+                    (size.height - diameter) / 2f
+                ),
+                size = Size(diameter, diameter)
+            )
+        }
+        drawCircle(color = tint, radius = radius, style = Stroke(width = strokeWidth))
     }
 }
 

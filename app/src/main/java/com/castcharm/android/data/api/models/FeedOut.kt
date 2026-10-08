@@ -49,6 +49,3 @@ data class NextUpOut(
 data class FeedUpdateRequest(
     val play_order: String? = null,
 )
-
-// Body for POST api/episodes/{id}/played — sets the state instead of toggling.
-data class PlayedRequest(val played: Boolean)
