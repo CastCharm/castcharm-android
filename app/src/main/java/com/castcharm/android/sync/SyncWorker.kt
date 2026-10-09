@@ -99,7 +99,10 @@ class SyncWorker(
         // once the file exists.
         runCatching {
             val downloaded = dao.getDownloadedEpisodesOnce()
-            downloaded.map { it.feed_id }.distinct()
+            // Continue Listening is the first thing opened in a car, so the
+            // covers for in-progress episodes are worth a durable copy too.
+            val inProgress = dao.getContinueListening(limit = 50).first()
+            (downloaded + inProgress).map { it.feed_id }.distinct()
                 .forEach { LocalArtwork.ensureFeed(applicationContext, it) }
             downloaded.forEach { LocalArtwork.ensureEpisode(applicationContext, it.id) }
         }.onFailure { Log.w("SyncWorker", "Cover art backfill failed", it) }

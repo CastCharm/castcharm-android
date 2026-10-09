@@ -94,6 +94,31 @@ class PodcastArtworkProvider : ContentProvider() {
             }.onFailure { Log.w(TAG, "Could not clear Coil cache for feed $feedId", it) }
         }
 
+        /**
+         * The best artwork file already on the device for an episode, without
+         * touching the network: its own durable or cached copy, else the feed's.
+         * Null when nothing is on the device yet.
+         */
+        fun localArtworkFileFor(context: android.content.Context, episode: com.castcharm.android.data.db.entities.EpisodeEntity): File? {
+            val cacheDir = File(context.cacheDir, CACHE_DIR_NAME)
+            fun ok(f: File) = f.takeIf { runCatching { it.length() > 0 }.getOrDefault(false) }
+            ok(LocalArtwork.episodeFile(context, episode.id))?.let { return it }
+            ok(File(cacheDir, "episode_${episode.id}.img"))?.let { return it }
+            ok(LocalArtwork.feedFile(context, episode.feed_id))?.let { return it }
+            val feedUrl = runCatching {
+                runBlocking { AppDatabase.getDatabase(context).feedDao().getFeedOnce(episode.feed_id)?.url }
+            }.getOrNull()
+            ok(File(cacheDir, feedArtworkCacheName(episode.feed_id, feedUrl)))?.let { return it }
+            return null
+        }
+
+        /** True when *bytes* are the placeholder this provider serves on failure. */
+        fun isFallbackImage(context: android.content.Context, bytes: ByteArray): Boolean {
+            val fallback = File(File(context.cacheDir, CACHE_DIR_NAME), "fallback.png")
+            if (!fallback.exists() || fallback.length() != bytes.size.toLong()) return false
+            return runCatching { fallback.readBytes().contentEquals(bytes) }.getOrDefault(false)
+        }
+
         fun prefetchFeedArtwork(context: android.content.Context, feedId: Int) {
             val cacheDir = File(context.cacheDir, CACHE_DIR_NAME).apply { if (!exists()) mkdirs() }
             try {
@@ -266,30 +291,39 @@ class PodcastArtworkProvider : ContentProvider() {
             Log.w(TAG, "AA EPISODE ART episode=$episodeId NOT FOUND")
             return serveFallback(cacheDir)
         }
-        val baseUrl = getBaseUrl()
-        
-        val chosenSource = episode.custom_image_url?.let { "custom" }
-            ?: episode.episode_image_url?.let { "episode" }
-            ?: episode.feed_image_url?.let { "feed_fallback" }
-            ?: if (baseUrl.isNotEmpty()) "server_cover" else null
 
-        val url = when(chosenSource) {
-            "custom" -> episode.custom_image_url
-            "episode" -> episode.episode_image_url
-            "feed_fallback" -> episode.feed_image_url
-            "server_cover" -> "${baseUrl}api/feeds/${episode.feed_id}/cover.jpg"
-            else -> null
+        // The durable copy stored beside a downloaded episode: no network, and
+        // still there after the system has cleared this cache.
+        val stored = LocalArtwork.episodeFile(context!!, episodeId)
+        if (stored.exists() && stored.length() > 0) {
+            runCatching { stored.copyTo(cacheFile, overwrite = true) }
+            if (cacheFile.exists() && cacheFile.length() > 0) {
+                return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            }
         }
 
-        Log.d(TAG, "AA EPISODE ART episode=$episodeId chosenSource=$chosenSource url=$url")
+        // Most episodes have no art of their own and simply show the podcast's
+        // cover. That cover is served by the feed path, which already knows the
+        // cache, the durable copy and the network, in that order — so defer to
+        // it rather than re-downloading the same image per episode. This used to
+        // go straight to the network for every such episode, which in a car (no
+        // reachable server, or not yet) meant the placeholder every time.
+        val ownArtUrl = episode.custom_image_url?.takeIf { it.isNotBlank() }
+            ?: episode.episode_image_url?.takeIf { it.isNotBlank() }
+        if (ownArtUrl == null) {
+            Log.d(TAG, "AA EPISODE ART episode=$episodeId → feed ${episode.feed_id} art")
+            return handleFeedArtwork(episode.feed_id, cacheDir)
+        }
 
-        if (url != null && downloadToCache(url, cacheFile)) {
-            Log.d(TAG, "AA EPISODE ART download_success cacheHit=false file=${cacheFile.absolutePath} size=${cacheFile.length()}")
+        Log.d(TAG, "AA EPISODE ART episode=$episodeId url=$ownArtUrl")
+        if (downloadToCache(ownArtUrl, cacheFile)) {
             return ParcelFileDescriptor.open(cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
         }
 
-        Log.w(TAG, "AA EPISODE ART episode=$episodeId using_fallback")
-        return serveFallback(cacheDir)
+        // Episode art unreachable: the podcast's cover is the right stand-in,
+        // and it is far more likely to be on the device already.
+        Log.w(TAG, "AA EPISODE ART episode=$episodeId own art failed; using feed art")
+        return handleFeedArtwork(episode.feed_id, cacheDir)
     }
 
     private fun downloadToCache(url: String, cacheFile: File): Boolean {

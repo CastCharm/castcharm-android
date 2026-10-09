@@ -1521,6 +1521,13 @@ private class PlayerLibrarySessionCallback(
                     val feedMap = feedDao.getFeedOnceAll().associateBy { it.id }
                     allItems = episodes.map { ep -> createEpisodeItem(ep, feedMap[ep.feed_id]?.title) }
                     resultParams = playableLibraryParams()
+                    // Episode rows draw their podcast's cover; make sure those
+                    // covers are cached while there may still be a network.
+                    scope.launch {
+                        episodes.map { it.feed_id }.distinct().take(12).forEach { id ->
+                            runCatching { PodcastArtworkProvider.prefetchFeedArtwork(context, id) }
+                        }
+                    }
                 }
 
                 parentId == SECTION_RECENT -> {
@@ -1528,6 +1535,13 @@ private class PlayerLibrarySessionCallback(
                     val feedMap = feedDao.getFeedOnceAll().associateBy { it.id }
                     allItems = episodes.map { ep -> createEpisodeItem(ep, feedMap[ep.feed_id]?.title) }
                     resultParams = playableLibraryParams()
+                    // Episode rows draw their podcast's cover; make sure those
+                    // covers are cached while there may still be a network.
+                    scope.launch {
+                        episodes.map { it.feed_id }.distinct().take(12).forEach { id ->
+                            runCatching { PodcastArtworkProvider.prefetchFeedArtwork(context, id) }
+                        }
+                    }
                 }
 
                 parentId == SECTION_DOWNLOADS -> {
@@ -1535,6 +1549,13 @@ private class PlayerLibrarySessionCallback(
                     val feedMap = feedDao.getFeedOnceAll().associateBy { it.id }
                     allItems = episodes.map { ep -> createEpisodeItem(ep, feedMap[ep.feed_id]?.title) }
                     resultParams = playableLibraryParams()
+                    // Episode rows draw their podcast's cover; make sure those
+                    // covers are cached while there may still be a network.
+                    scope.launch {
+                        episodes.map { it.feed_id }.distinct().take(12).forEach { id ->
+                            runCatching { PodcastArtworkProvider.prefetchFeedArtwork(context, id) }
+                        }
+                    }
                 }
 
                 else -> {
@@ -1930,8 +1951,16 @@ private suspend fun artworkBytesFor(context: Context, episode: EpisodeEntity): B
     val artworkUri = resolveEpisodeArtworkUri(context, episode)
     return withContext(Dispatchers.IO) {
         runCatching {
-            val raw = context.contentResolver.openInputStream(artworkUri)?.use { it.readBytes() }
+            // Whatever is already on the device wins; only then ask the provider,
+            // which may have to go to the network. Embedding its placeholder would
+            // pin the app icon onto the now-playing screen for the whole episode,
+            // so when that is all it can offer, embed nothing and leave the URI —
+            // the head unit re-asks, and by then the cover may have arrived.
+            val local = PodcastArtworkProvider.localArtworkFileFor(context, episode)
+            val raw = local?.readBytes()
+                ?: context.contentResolver.openInputStream(artworkUri)?.use { it.readBytes() }
                 ?: return@runCatching null
+            if (local == null && PodcastArtworkProvider.isFallbackImage(context, raw)) return@runCatching null
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
             android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
             var sample = 1
