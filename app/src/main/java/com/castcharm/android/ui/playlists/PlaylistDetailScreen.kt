@@ -64,10 +64,13 @@ fun PlaylistDetailScreen(
     val isCustomPlaylist = uiState.playlist?.type == "custom"
     val lazyListState = rememberLazyListState()
 
+    // The library reports positions within the whole LazyColumn, and the
+    // header item sits at index 0, so those indices are off by one from the
+    // episode list (dragging the last episode produced an index equal to the
+    // list size and crashed). Resolve moves by item key instead, and send the
+    // order to the server once per drag rather than once per step.
     val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        val currentEpisodes = uiState.episodes.toMutableList()
-        currentEpisodes.add(to.index, currentEpisodes.removeAt(from.index))
-        viewModel.reorderEpisodes(currentEpisodes)
+        viewModel.moveEpisode(from.key, to.key)
     }
 
     ConsumeSnackbarMessage(
@@ -164,7 +167,7 @@ fun PlaylistDetailScreen(
                                         Icons.Default.DragHandle,
                                         contentDescription = "Drag to reorder",
                                         modifier = Modifier
-                                            .draggableHandle()
+                                            .draggableHandle(onDragStopped = { viewModel.commitOrder() })
                                             .padding(start = 8.dp)
                                             .size(24.dp),
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)

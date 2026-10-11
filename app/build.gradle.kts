@@ -12,8 +12,8 @@ android {
         applicationId = "com.castcharm.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 20
-        versionName = "1.9.0"
+        versionCode = 21
+        versionName = "1.10.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

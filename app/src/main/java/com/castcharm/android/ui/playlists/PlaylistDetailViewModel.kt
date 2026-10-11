@@ -81,9 +81,30 @@ class PlaylistDetailViewModel(private val playlistId: Int) : ViewModel() {
         }
     }
 
-    fun reorderEpisodes(newOrder: List<EpisodeEntity>) {
-        _uiState.update { it.copy(episodes = newOrder) }
-        val ids = newOrder.map { it.id }
+    // Set while a drag has changed the on-screen order but the server has not
+    // been told yet.
+    private var orderDirty = false
+
+    // One step of a drag: move the episode with [fromKey] to where [toKey]
+    // sits. Keys are episode ids, so a move that no longer resolves (list
+    // refreshed mid-drag) is ignored rather than crashing.
+    fun moveEpisode(fromKey: Any?, toKey: Any?) {
+        _uiState.update { state ->
+            val list = state.episodes.toMutableList()
+            val fromIdx = list.indexOfFirst { it.id == fromKey }
+            val toIdx = list.indexOfFirst { it.id == toKey }
+            if (fromIdx < 0 || toIdx < 0 || fromIdx == toIdx) return@update state
+            list.add(toIdx, list.removeAt(fromIdx))
+            orderDirty = true
+            state.copy(episodes = list)
+        }
+    }
+
+    // Called when the drag ends: persist the order shown on screen.
+    fun commitOrder() {
+        if (!orderDirty) return
+        orderDirty = false
+        val ids = _uiState.value.episodes.map { it.id }
         viewModelScope.launch {
             try {
                 CastCharmApp.apiClient.getApi().reorderPlaylist(playlistId, ReorderRequest(ids))
