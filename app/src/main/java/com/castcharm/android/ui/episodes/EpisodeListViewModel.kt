@@ -74,6 +74,8 @@ data class EpisodeListUiState(
     // ones — so "delete downloads" over a whole-feed selection can tell whether
     // there is anything to delete without having fetched all of it.
     val downloadedEpisodeIds: Set<Int> = emptySet(),
+    // episode id → playlists on this phone that also use its downloaded file
+    val owners: Map<Int, Map<String, String>> = emptyMap(),
     val isInitialLoading: Boolean = true,
     val isRefreshing: Boolean = false,
     val isSyncing: Boolean = false,
@@ -209,6 +211,10 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
         // screen's ON_RESUME observer (OnScreenResumed in MainActivity), so that
         // arriving at this screen produces exactly one refresh.
         observeLocalData()
+        viewModelScope.launch {
+            com.castcharm.android.data.repository.PlaylistRepository(db).ownerNamesFlow()
+                .collect { map -> _uiState.update { it.copy(owners = map) } }
+        }
     }
 
     private fun feedRepositoryOrNull(): FeedRepository? {
@@ -899,14 +905,20 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
     // one, then clears the selection. Episodes that aren't downloaded are
     // silently skipped inside deleteLocalFile(). This affects the phone only —
     // the episode remains available on the server.
-    fun deleteSelectedDownloads() {
+    fun deleteSelectedDownloads(everywhere: Boolean = true) {
         viewModelScope.launch {
             _uiState.value.selectedEpisodes.forEach { id ->
-                runCatching { storageManager.deleteLocalFile(id) }
+                runCatching {
+                    if (everywhere) storageManager.removeDownload(id)
+                    else storageManager.releaseOwner(id, com.castcharm.android.download.DownloadOwners.FEED)
+                }
             }
             exitSelectionMode()
         }
     }
+
+    fun sharedFromFeed(episodeId: Int): List<String> =
+        (_uiState.value.owners[episodeId] ?: emptyMap()).filterKeys { it != com.castcharm.android.download.DownloadOwners.FEED }.values.toList()
 
     fun toggleHidden(episodeId: Int, currentlyHidden: Boolean) {
         viewModelScope.launch {

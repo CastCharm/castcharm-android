@@ -101,6 +101,12 @@ class SyncWorker(
         runCatching { com.castcharm.android.download.StorageManager(applicationContext).reconcileOrphanFiles(api) }
             .onFailure { Log.w("SyncWorker", "Orphan file reconcile failed", it) }
         runCatching { com.castcharm.android.download.DownloadScheduler(applicationContext).kickQueue() }
+        // Keep playlists current on the phone (Home card, Downloads tab, Android
+        // Auto), and save Get Caught Up to the phone when the user asked for that.
+        runCatching { com.castcharm.android.data.repository.PlaylistRepository(AppDatabase.getDatabase(applicationContext)).refreshAll() }
+            .onFailure { Log.w("SyncWorker", "Playlist refresh failed", it) }
+        runCatching { com.castcharm.android.download.CatchUpDownloader.run(applicationContext) }
+            .onFailure { Log.w("SyncWorker", "Get Caught Up download pass failed", it) }
         // Piggyback: make sure every feed with episodes downloaded to this device
         // also has its cover stored locally. New downloads store it as they
         // finish, but anything already on the phone would otherwise never

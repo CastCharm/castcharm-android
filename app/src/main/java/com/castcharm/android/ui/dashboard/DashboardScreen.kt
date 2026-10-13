@@ -14,6 +14,13 @@
 package com.castcharm.android.ui.dashboard
 
 import com.castcharm.android.ui.shared_components.AppTopBarTitle
+import com.castcharm.android.ui.playlists.formatHours
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -64,10 +71,12 @@ fun DashboardScreen(
     onSearchClick: (() -> Unit)? = null,
     isOfflineMode: Boolean = false,
     isReconnectInFlight: Boolean = false,
-    onRetryConnection: (() -> Unit)? = null
+    onRetryConnection: (() -> Unit)? = null,
+    onPlayMediaId: (String) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(isOfflineMode) { viewModel.setOffline(isOfflineMode) }
 
     ConsumeSnackbarMessage(
         message = uiState.errorMessage,
@@ -102,7 +111,15 @@ fun DashboardScreen(
                 modifier = Modifier.padding(top = padding.calculateTopPadding()),
                 onNavigateToDownloads = onNavigateToDownloads,
                 isReconnectInFlight = isReconnectInFlight,
-                onRetryConnection = onRetryConnection
+                onRetryConnection = onRetryConnection,
+                catchUp = {
+                    GetCaughtUpCard(
+                        uiState = uiState, isOffline = true,
+                        onPlayAll = { uiState.catchUpPlaylist?.let { onPlayMediaId("playlist_${it.id}") } },
+                        onPlayItem = { ep -> uiState.catchUpPlaylist?.let { onPlayMediaId("playlist_${it.id}_from_${ep.id}") } },
+                        onTitleClick = { ep -> onNavigateToEpisode(ep.feed_id, ep.id) }
+                    )
+                }
             )
             return@Scaffold
         }
@@ -110,7 +127,7 @@ fun DashboardScreen(
         val anyLoading = uiState.statsLoading ||
             uiState.feedHealthLoading ||
             uiState.continueListeningLoading ||
-            uiState.newestLoading ||
+            uiState.catchUpLoading ||
             uiState.suggestionsLoading ||
             uiState.backlogLoading
 
@@ -135,6 +152,15 @@ fun DashboardScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            item {
+                GetCaughtUpCard(
+                    uiState = uiState, isOffline = false,
+                    onPlayAll = { uiState.catchUpPlaylist?.let { onPlayMediaId("playlist_${it.id}") } },
+                    onPlayItem = { ep -> uiState.catchUpPlaylist?.let { onPlayMediaId("playlist_${it.id}_from_${ep.id}") } },
+                    onTitleClick = { ep -> onNavigateToEpisode(ep.feed_id, ep.id) }
+                )
+            }
+
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -243,35 +269,6 @@ fun DashboardScreen(
 
             item {
                 DashboardCard(
-                    title = "Newest Episodes",
-                    isLoading = uiState.newestLoading
-                ) {
-                    when {
-                        uiState.newestLoading && uiState.newestEpisodes.isEmpty() -> {
-                            InlineLoadingRows(count = 3)
-                        }
-
-                        uiState.newestEpisodes.isEmpty() -> {
-                            EmptySectionText("No recent downloaded episodes yet.")
-                        }
-
-                        else -> {
-                            uiState.newestEpisodes.forEach { item ->
-                                EpisodeRow(
-                                    episode = item.episode,
-                                    feedTitle = item.feed?.title ?: "",
-                                    sub = item.episode.local_size_bytes?.let { formatBytes(it) } ?: "",
-                                    onTitleClick = { onNavigateToEpisode(item.episode.feed_id, item.episode.id) },
-                                    onPlayClick = { onPlayEpisode(item.episode.id) }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                DashboardCard(
                     title = "Suggested Listening",
                     isLoading = uiState.suggestionsLoading,
                     action = {
@@ -362,21 +359,100 @@ private fun OfflineDashboardContent(
     modifier: Modifier = Modifier,
     onNavigateToDownloads: () -> Unit,
     isReconnectInFlight: Boolean = false,
-    onRetryConnection: (() -> Unit)? = null
+    onRetryConnection: (() -> Unit)? = null,
+    catchUp: @Composable () -> Unit = {}
 ) {
-    Box(
+    Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
+            .verticalScroll(rememberScrollState())
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         OfflineModePanel(
-            message = "Home isn’t available while offline. You can still open Downloads, use Settings, and play files already saved on this device.",
+            message = "You’re offline. Episodes saved on this phone still play, and Get Caught Up below shows the ones you have.",
             primaryActionLabel = "Go to Downloads",
             onPrimaryAction = onNavigateToDownloads,
             reconnectInFlight = isReconnectInFlight,
             onRetryConnection = onRetryConnection
         )
+        catchUp()
+    }
+}
+
+// The built-in "Get Caught Up" smart playlist, first on Home. Same copy as
+// the web card: a count/hours/rules line, Play all, the rows (first 8, then
+// "Show more"), and an empty state that names the rules.
+@Composable
+private fun GetCaughtUpCard(
+    uiState: DashboardUiState,
+    isOffline: Boolean,
+    onPlayAll: () -> Unit,
+    onPlayItem: (EpisodeEntity) -> Unit,
+    onTitleClick: (EpisodeEntity) -> Unit
+) {
+    var showAll by remember { mutableStateOf(false) }
+    val items = uiState.catchUp
+    val total = items.sumOf { it.episode.duration ?: 0 }
+    val rulesText = uiState.catchUpRules?.describe() ?: ""
+    DashboardCard(
+        title = uiState.catchUpPlaylist?.name ?: "Get Caught Up",
+        isLoading = uiState.catchUpLoading,
+        action = if (items.isNotEmpty()) ({
+            TextButton(onClick = onPlayAll) {
+                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Play all")
+            }
+        }) else null
+    ) {
+        when {
+            uiState.catchUpLoading && items.isEmpty() -> InlineLoadingRows(count = 3)
+
+            uiState.catchUpPlaylist == null -> EmptySectionText(
+                if (isOffline) "Get Caught Up will appear here once the app has synced with your server."
+                else "The built-in Get Caught Up playlist is missing; restart the server to recreate it."
+            )
+
+            items.isEmpty() -> {
+                Column(modifier = Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("You're all caught up!", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (isOffline) "None of the episodes saved on this phone match the following criteria:"
+                        else "You don't have any episodes that match the following criteria:",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(rulesText, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            else -> {
+                Text(
+                    buildString {
+                        append("${items.size} episode${if (items.size == 1) "" else "s"}")
+                        if (total > 0) append(" · ${formatHours(total)}")
+                        if (rulesText.isNotBlank()) append(" · $rulesText")
+                        if (isOffline) append(" · on this phone")
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val shown = if (showAll) items else items.take(8)
+                shown.forEach { item ->
+                    EpisodeRow(
+                        episode = item.episode,
+                        feedTitle = item.feed?.title ?: "",
+                        sub = item.episode.duration?.let { formatHours(it) } ?: "",
+                        onTitleClick = { onTitleClick(item.episode) },
+                        onPlayClick = { onPlayItem(item.episode) }
+                    )
+                }
+                if (items.size > 8) {
+                    TextButton(onClick = { showAll = !showAll }) {
+                        Text(if (showAll) "Show fewer" else "Show ${items.size - 8} more")
+                    }
+                }
+            }
+        }
     }
 }
 

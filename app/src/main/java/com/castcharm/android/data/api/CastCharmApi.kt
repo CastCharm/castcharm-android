@@ -18,6 +18,8 @@ package com.castcharm.android.data.api
 //                 returns a dynamically shaped object)
 
 import com.castcharm.android.data.api.models.*
+import com.castcharm.android.data.api.models.SmartPreviewOut
+import com.castcharm.android.data.api.models.SmartRules
 import okhttp3.ResponseBody
 import retrofit2.http.*
 
@@ -241,6 +243,9 @@ interface CastCharmApi {
     suspend fun getStats(): Map<String, Any?>
 
     // ---- Playlists ----------------------------------------------------------
+    @POST("api/playlists/preview")
+    suspend fun previewPlaylist(@Body rules: SmartRules): SmartPreviewOut
+
     @GET("api/playlists")
     suspend fun getPlaylists(): List<PlaylistOut>
 

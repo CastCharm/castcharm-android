@@ -15,6 +15,7 @@ package com.castcharm.android.download
 // to find which rows are ready to receive a new worker assignment.
 
 import android.content.Context
+import com.castcharm.android.data.db.entities.DownloadOwnerEntity
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -45,8 +46,11 @@ class DownloadScheduler(private val context: Context) {
     private val downloadDao = db.downloadDao()
     private val workManager = WorkManager.getInstance(context)
 
-    suspend fun scheduleDownload(episodeId: Int): String? {
+    suspend fun scheduleDownload(episodeId: Int, owner: String = DownloadOwners.FEED): String? {
         val episode = episodeDao.getEpisodeOnce(episodeId)
+        // Remember why this file is wanted, whether or not it is here already:
+        // a second owner is what makes a file "shared".
+        db.downloadOwnerDao().add(DownloadOwnerEntity(episodeId, owner))
 
         // If the episode already has a local file, any leftover download row is
         // stale — clean it up and return. No new download is needed.
@@ -125,6 +129,7 @@ class DownloadScheduler(private val context: Context) {
     }
 
     suspend fun cancelDownload(episodeId: Int) {
+        db.downloadOwnerDao().removeAll(episodeId)
         // Signal WorkManager to stop the running worker if one is assigned.
         // runCatching suppresses IllegalStateException if WorkManager is not yet
         // initialized (possible on first launch before the process is fully set up).

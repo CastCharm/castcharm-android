@@ -19,6 +19,9 @@ package com.castcharm.android.ui.downloads
 // currentFeed* fields show only that feed's episodes/downloads.
 
 import androidx.lifecycle.ViewModel
+import com.castcharm.android.download.DownloadOwners
+import com.castcharm.android.data.repository.PlaylistRepository
+import com.castcharm.android.data.db.entities.PlaylistEntity
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -65,7 +68,17 @@ data class FeedDownloadItem(
     val downloadCount: Int
 )
 
+data class PlaylistDownloadItem(
+    val playlist: PlaylistEntity,
+    val onPhoneCount: Int
+)
+
 data class DownloadsUiState(
+    val playlistDownloads: List<PlaylistDownloadItem> = emptyList(),
+    // episode id → (owner key → wording) for every file on the phone
+    val owners: Map<Int, Map<String, String>> = emptyMap(),
+    val selectedPlaylistId: Int? = null,
+    val currentPlaylistEpisodes: List<EpisodeEntity> = emptyList(),
     val downloadedFeeds: List<FeedDownloadItem> = emptyList(),
     val downloadedEpisodes: List<EpisodeEntity> = emptyList(),
     val currentFeedDownloadedEpisodes: List<EpisodeEntity> = emptyList(),
@@ -97,9 +110,79 @@ class DownloadsViewModel : ViewModel() {
     private val serverActivePollIntervalMs = 5_000L
     private val lastKnownPhoneProgress = mutableMapOf<Int, DownloadProgressUi>()
 
+    private val playlistRepo = PlaylistRepository(db)
+    private var playlistEpisodeLists: Map<Int, List<EpisodeEntity>> = emptyMap()
+
     init {
         observeDownloads()
+        observePlaylistDownloads()
+        viewModelScope.launch {
+            playlistRepo.ownerNamesFlow().collect { map -> _uiState.update { it.copy(owners = map) } }
+        }
     }
+
+    /** Other owners of a file, as wording, from a given context. */
+    fun sharedFrom(episodeId: Int, contextOwner: String): List<String> =
+        (_uiState.value.owners[episodeId] ?: emptyMap()).filterKeys { it != contextOwner }.values.toList()
+
+    /** Drop one context's claim; the file stays if another owner remains. */
+    fun removeFromContext(episodeId: Int, contextOwner: String) {
+        viewModelScope.launch { storageManager.releaseOwner(episodeId, contextOwner) }
+    }
+
+    fun removeManyFromContext(episodeIds: Collection<Int>, contextOwner: String) {
+        viewModelScope.launch { episodeIds.forEach { storageManager.releaseOwner(it, contextOwner) }; clearSelection() }
+    }
+
+    // Playlists with at least one member saved on this phone. Smart lists are
+    // evaluated over the phone's files, so a played episode leaves at once.
+    private fun observePlaylistDownloads() {
+        viewModelScope.launch {
+            combine(
+                db.playlistDao().getAll(),
+                db.playlistDao().allMembers(),
+                episodeDao.getDownloadedEpisodes(),
+                db.downloadOwnerDao().all()
+            ) { playlists, members, downloaded, owners ->
+                // A playlist "has" the files that were downloaded for it (its
+                // owner key), shown in the playlist's own order.
+                val byId = downloaded.associateBy { it.id }
+                playlists.associate { pl ->
+                    val key = playlistRepo.ownerFor(pl)
+                    val owned = owners.filter { it.owner == key }.map { it.episode_id }.toSet()
+                    val rules = playlistRepo.rulesOf(pl)
+                    val ordered = if (pl.isSmart && rules != null) rules.evaluate(downloaded, localOnly = true)
+                                  else members.filter { it.playlist_id == pl.id }.sortedBy { it.position }.mapNotNull { byId[it.episode_id] }
+                    val orderedIds = ordered.map { it.id }.toSet()
+                    val eps = ordered.filter { it.id in owned } + downloaded.filter { it.id in owned && it.id !in orderedIds }
+                    pl to eps
+                }
+            }.collect { map ->
+                playlistEpisodeLists = map.entries.associate { it.key.id to it.value }
+                val items = map.entries.filter { it.value.isNotEmpty() }.map { PlaylistDownloadItem(it.key, it.value.size) }
+                _uiState.update {
+                    it.copy(
+                        playlistDownloads = items,
+                        currentPlaylistEpisodes = it.selectedPlaylistId?.let { id -> playlistEpisodeLists[id] } ?: emptyList()
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectPlaylist(playlistId: Int?) {
+        _uiState.update {
+            it.copy(
+                selectedPlaylistId = playlistId,
+                selectedFeedId = null,
+                currentPlaylistEpisodes = playlistId?.let { id -> playlistEpisodeLists[id] } ?: emptyList(),
+                selectedEpisodes = emptySet()
+            )
+        }
+    }
+
+    fun playPlaylist(playlistId: Int) = CastCharmApp.playerController.playMediaId("playlist_$playlistId")
+    fun playPlaylistFrom(playlistId: Int, episodeId: Int) = CastCharmApp.playerController.playMediaId("playlist_${playlistId}_from_$episodeId")
 
     private fun episodeRepositoryOrNull(): EpisodeRepository? {
         return if (CastCharmApp.apiClient.isInitialized) {
@@ -238,23 +321,9 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
+    /** Delete the file for everyone: every owner's claim goes with it. */
     fun deleteEpisodeDownload(episode: EpisodeEntity) {
-        viewModelScope.launch {
-            episode.local_path?.let { path ->
-                java.io.File(path).delete()
-                episodeDao.update(
-                    episode.copy(
-                        local_path = null,
-                        local_size_bytes = null
-                    )
-                )
-                // Artwork counts against the download quota, so it has to go with
-                // the episode it was kept for. Called after the row is cleared —
-                // it checks whether the feed has any downloads left before also
-                // dropping the feed cover.
-                storageManager.releaseArtworkFor(episode.id, episode.feed_id)
-            }
-        }
+        viewModelScope.launch { storageManager.removeDownload(episode.id) }
     }
 
     fun deleteEpisodeDownloadById(episodeId: Int) {
@@ -264,20 +333,20 @@ class DownloadsViewModel : ViewModel() {
         }
     }
 
-    fun deleteFeedDownloads(feedId: Int) {
+    /** Everything under a podcast: delete the files (everywhere), or just drop
+     *  the podcast's claim so files other owners want stay. */
+    fun deleteFeedDownloads(feedId: Int, everywhere: Boolean = true) {
         viewModelScope.launch {
-            val episodes = episodeDao.getEpisodesByFeedOnce(feedId)
-            episodes.filter { it.local_path != null }.forEach { ep ->
-                java.io.File(ep.local_path!!).delete()
-                episodeDao.update(
-                    ep.copy(
-                        local_path = null,
-                        local_size_bytes = null
-                    )
-                )
-                storageManager.releaseArtworkFor(ep.id, ep.feed_id)
+            val episodes = episodeDao.getEpisodesByFeedOnce(feedId).filter { it.local_path != null }
+            episodes.forEach { ep ->
+                if (everywhere) storageManager.removeDownload(ep.id) else storageManager.releaseOwner(ep.id, DownloadOwners.FEED)
             }
         }
+    }
+
+    fun feedSharedCount(feedId: Int): Pair<Int, Int> {
+        val ids = _uiState.value.downloadedEpisodes.filter { it.feed_id == feedId }.map { it.id }
+        return ids.count { sharedFrom(it, DownloadOwners.FEED).isNotEmpty() } to ids.size
     }
 
     fun toggleEpisodeSelection(episodeId: Int) {
@@ -299,20 +368,16 @@ class DownloadsViewModel : ViewModel() {
 
     fun deleteSelectedEpisodes() {
         viewModelScope.launch {
-            val toDelete = _uiState.value.selectedEpisodes
-            val episodes = episodeDao.getDownloadedEpisodesOnce()
-            episodes.filter { it.id in toDelete }.forEach { ep ->
-                ep.local_path?.let { path -> java.io.File(path).delete() }
-                episodeDao.update(
-                    ep.copy(
-                        local_path = null,
-                        local_size_bytes = null
-                    )
-                )
-                storageManager.releaseArtworkFor(ep.id, ep.feed_id)
-            }
+            _uiState.value.selectedEpisodes.forEach { storageManager.removeDownload(it) }
             clearSelection()
         }
+    }
+
+    /** The owner key for whatever list the user is looking at. */
+    fun contextOwner(): String {
+        val st = _uiState.value
+        st.selectedPlaylistId?.let { id -> st.playlistDownloads.find { it.playlist.id == id }?.let { return playlistRepo.ownerFor(it.playlist) } }
+        return DownloadOwners.FEED
     }
 
     // Combines four DB Flows so any change to downloads, episodes, feeds, or
@@ -326,8 +391,13 @@ class DownloadsViewModel : ViewModel() {
                 episodeDao.getDownloadedEpisodes(),
                 episodeDao.getInProgressEpisodes(),
                 feedDao.getAllFeeds(),
-                downloadDao.getAllDownloads()
-            ) { downloaded: List<EpisodeEntity>, inProgress: List<EpisodeEntity>, allFeeds: List<FeedEntity>, allDownloadRows: List<DownloadEntity> ->
+                downloadDao.getAllDownloads(),
+                db.downloadOwnerDao().all()
+            ) { downloadedAll: List<EpisodeEntity>, inProgress: List<EpisodeEntity>, allFeeds: List<FeedEntity>, allDownloadRows: List<DownloadEntity>, ownerRows: List<com.castcharm.android.data.db.entities.DownloadOwnerEntity> ->
+                // Under podcasts: files downloaded from the podcast (owner "feed"),
+                // plus any with no owner on record, which can only have come that way.
+                val ownersById = ownerRows.groupBy { it.episode_id }.mapValues { e -> e.value.map { it.owner }.toSet() }
+                val downloaded = downloadedAll.filter { ep -> ownersById[ep.id].let { it == null || DownloadOwners.FEED in it } }
                 val feedMap = allFeeds.associateBy { it.id }
                 val phoneRowsByEpisodeId = allDownloadRows.associateBy { it.episode_id }
                 val phoneEpisodeIds = phoneRowsByEpisodeId.keys
@@ -413,8 +483,12 @@ class DownloadsViewModel : ViewModel() {
                 )
 
                 DownloadsUiState(
+                    playlistDownloads = _uiState.value.playlistDownloads,
+                    owners = _uiState.value.owners,
+                    selectedPlaylistId = _uiState.value.selectedPlaylistId,
+                    currentPlaylistEpisodes = _uiState.value.currentPlaylistEpisodes,
                     downloadedFeeds = downloadedFeeds,
-                    downloadedEpisodes = downloaded,
+                    downloadedEpisodes = downloadedAll,
                     currentFeedDownloadedEpisodes = currentFeedDownloaded,
                     currentFeedPhoneInProgress = currentFeedPhone,
                     currentFeedServerInProgress = currentFeedServer,

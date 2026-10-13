@@ -23,6 +23,7 @@
 package com.castcharm.android.ui.settings
 
 import androidx.compose.foundation.background
+import com.castcharm.android.AUTO_DOWNLOAD_CATCHUP_KEY
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.*
@@ -91,6 +92,7 @@ data class SettingsUiState(
     val isClearing: Boolean = false,
     val enablePlaylists: Boolean = DEFAULT_ENABLE_PLAYLISTS,
     val wifiOnlyDownloads: Boolean = false,
+    val autoDownloadCatchUp: Boolean = false,
     val skipSilence: Boolean = false,
     val notifyNewEpisodes: Boolean = false,
     val opmlImportState: OpmlImportState? = null,
@@ -145,6 +147,9 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
             val skipSilence = CastCharmApp.instance.dataStore.data
                 .map { it[SKIP_SILENCE_KEY] ?: false }
                 .first()
+            val autoDownloadCatchUp = CastCharmApp.instance.dataStore.data
+                .map { it[AUTO_DOWNLOAD_CATCHUP_KEY] ?: false }
+                .first()
             val notifyNewEpisodes = CastCharmApp.instance.dataStore.data
                 .map { it[NOTIFY_NEW_EPISODES_KEY] ?: false }
                 .first()
@@ -171,6 +176,7 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
                 maxConcurrentDownloads = maxConcurrentDownloads,
                 enablePlaylists = enablePlaylists,
                 wifiOnlyDownloads = wifiOnlyDownloads,
+                    autoDownloadCatchUp = autoDownloadCatchUp,
                 skipSilence = skipSilence,
                 notifyNewEpisodes = notifyNewEpisodes,
             )
@@ -226,6 +232,15 @@ class SettingsViewModel(private val storageManager: StorageManager) : ViewModel(
         viewModelScope.launch {
             CastCharmApp.instance.dataStore.edit { it[WIFI_ONLY_DOWNLOADS_KEY] = enabled }
             _uiState.value = _uiState.value.copy(wifiOnlyDownloads = enabled)
+        }
+    }
+
+    fun setAutoDownloadCatchUp(enabled: Boolean) {
+        viewModelScope.launch {
+            CastCharmApp.instance.dataStore.edit { it[AUTO_DOWNLOAD_CATCHUP_KEY] = enabled }
+            _uiState.value = _uiState.value.copy(autoDownloadCatchUp = enabled)
+            // Start right away rather than waiting for the hourly sync.
+            if (enabled) runCatching { com.castcharm.android.download.CatchUpDownloader.run(CastCharmApp.instance) }
         }
     }
 
@@ -617,6 +632,12 @@ fun SettingsScreen(
                             subtitle = "Wait for an unmetered network before downloading episodes.",
                             checked = uiState.wifiOnlyDownloads,
                             onCheckedChange = { viewModel.setWifiOnlyDownloads(it) },
+                        )
+                        SettingsToggleRow(
+                            title = "Always download \"Get Caught Up\" to this phone",
+                            subtitle = "While online, checks the server regularly and saves every episode in the Get Caught Up playlist to this phone, so your backlog is here if you go offline. Files it saved are removed again once they leave the list, unless you also downloaded them yourself. Honours Wi-Fi-only.",
+                            checked = uiState.autoDownloadCatchUp,
+                            onCheckedChange = { viewModel.setAutoDownloadCatchUp(it) },
                         )
                         SettingsToggleRow(
                             title = "Skip silence",

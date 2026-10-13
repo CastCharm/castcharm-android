@@ -30,6 +30,11 @@ val NOTIFY_NEW_EPISODES_KEY = booleanPreferencesKey("notify_new_episodes")
 // and eligible for notification.
 val LAST_NOTIFIED_EPISODE_ID_KEY = longPreferencesKey("last_notified_episode_id")
 
+// Downloads: when true, every episode in the built-in "Get Caught Up" smart
+// playlist is saved to this phone whenever the app syncs while online
+// (CatchUpDownloader), so the backlog is available offline.
+val AUTO_DOWNLOAD_CATCHUP_KEY = booleanPreferencesKey("auto_download_catchup")
+
 // Playback: the episode most recently loaded in the player. Lets a
 // chronological feed resume where it was when the server cannot be reached
 // (see NextUpResolver), instead of jumping to a different episode.

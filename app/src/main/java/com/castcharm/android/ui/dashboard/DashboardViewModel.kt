@@ -17,6 +17,14 @@ package com.castcharm.android.ui.dashboard
 // Continue Listening is still live via Flow even offline.
 
 import android.util.Log
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flatMapLatest
+import com.castcharm.android.download.CatchUpDownloader
+import com.castcharm.android.data.api.models.SmartRules
+import com.castcharm.android.data.db.entities.PlaylistEntity
+import com.castcharm.android.data.repository.PlaylistRepository
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.castcharm.android.CastCharmApp
@@ -53,6 +61,11 @@ data class DashboardUiState(
     val feedErrors: List<FeedEntity> = emptyList(),
     val continueListening: List<DashboardItem> = emptyList(),
     val newestEpisodes: List<DashboardItem> = emptyList(),
+    // The built-in "Get Caught Up" smart playlist, live from Room.
+    val catchUp: List<DashboardItem> = emptyList(),
+    val catchUpPlaylist: PlaylistEntity? = null,
+    val catchUpRules: SmartRules? = null,
+    val catchUpLoading: Boolean = true,
     val suggestionBuckets: List<SuggestionBucket> = emptyList(),
     val topBacklog: List<FeedEntity> = emptyList(),
     val statsLoading: Boolean = true,
@@ -69,6 +82,7 @@ data class DashboardUiState(
     val errorMessage: String? = null
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class DashboardViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
@@ -77,8 +91,37 @@ class DashboardViewModel : ViewModel() {
     private val storageManager = StorageManager(CastCharmApp.instance)
 
     private val _feedMap = MutableStateFlow<Map<Int, FeedEntity>>(emptyMap())
+    private val playlistRepo = PlaylistRepository(db)
+    private val offline = MutableStateFlow(CastCharmApp.isOfflineMode)
+
+    fun setOffline(isOffline: Boolean) { offline.value = isOffline }
 
     init {
+        // Feed titles for every card, offline too.
+        viewModelScope.launch {
+            db.feedDao().getAllFeeds().collect { feeds -> _feedMap.value = feeds.associateBy { it.id } }
+        }
+        // Get Caught Up: the system playlist's live members (phone files only
+        // while offline), so a played episode leaves the card at once.
+        viewModelScope.launch {
+            combine(offline, playlistRepo.systemPlaylistFlow()) { off, pl -> off to pl }
+                .flatMapLatest { (off, pl) ->
+                    if (pl == null) flowOf(Triple<PlaylistEntity?, List<EpisodeEntity>, Boolean>(null, emptyList(), off))
+                    else playlistRepo.membersFlow(pl.id, localOnly = off).map { Triple(pl, it, off) }
+                }
+                .combine(_feedMap) { (pl, eps, _), feedMap -> Triple(pl, eps, feedMap) }
+                .collect { (pl, eps, feedMap) ->
+                    _uiState.update {
+                        it.copy(
+                            catchUp = eps.map { ep -> DashboardItem(ep, feedMap[ep.feed_id]) },
+                            catchUpPlaylist = pl,
+                            catchUpRules = playlistRepo.rulesOf(pl),
+                            catchUpLoading = false
+                        )
+                    }
+                }
+        }
+
         viewModelScope.launch {
             combine(continueListeningFlow(), _feedMap) { eps, feedMap ->
                 eps.map { ep -> DashboardItem(ep, feedMap[ep.feed_id]) }
@@ -232,42 +275,6 @@ class DashboardViewModel : ViewModel() {
                     )
                 }
 
-                if (CastCharmApp.isOfflineMode || !CastCharmApp.apiClient.isInitialized) {
-                    val continueEpisodes = db.episodeDao().getContinueListening(5).first()
-                    val downloadedEpisodes = db.episodeDao()
-                        .getDownloadedEpisodesOnce()
-                        .sortedByDescending { it.published_at }
-                        .take(5)
-
-                    _uiState.update {
-                        it.copy(
-                            podcastsTotal = localFeeds.size,
-                            feedsTotal = localFeeds.size,
-                            feedErrors = localFeeds.filter { feed -> feed.last_error != null }.take(6),
-                            topBacklog = localFeeds
-                                .filter { feed -> feed.unplayed_count > 0 }
-                                .sortedByDescending { feed -> feed.unplayed_count }
-                                .take(6),
-                            continueListening = continueEpisodes.map { ep ->
-                                DashboardItem(ep, localFeedMap[ep.feed_id])
-                            },
-                            newestEpisodes = downloadedEpisodes.map { ep ->
-                                DashboardItem(ep, localFeedMap[ep.feed_id])
-                            },
-                            suggestionBuckets = emptyList(),
-                            statsLoading = false,
-                            feedHealthLoading = false,
-                            continueListeningLoading = false,
-                            newestLoading = false,
-                            suggestionsLoading = false,
-                            backlogLoading = false,
-                            isRefreshing = false,
-                    isPullRefreshing = false,
-                            errorMessage = null
-                        )
-                    }
-                    return@launch
-                }
 
                 try {
                     val api = CastCharmApp.apiClient.getApi()
@@ -321,27 +328,13 @@ class DashboardViewModel : ViewModel() {
                 }
 
                 try {
-                    val newestRaw = CastCharmApp.apiClient.getApi().getAllEpisodes(status = "downloaded", limit = 20)
-                    val feedMap = _feedMap.value
-
-                    fun EpisodeEntity.asDashboardItem(): DashboardItem {
-                        return DashboardItem(this, feedMap[this.feed_id])
-                    }
-
-                    val newestEntities = newestRaw
-                        .sortedByDescending { it.published_at }
-                        .take(5)
-                        .map { it.toEntity(db.episodeDao().getEpisodeOnce(it.id)) }
-
-                    _uiState.update {
-                        it.copy(
-                            newestEpisodes = newestEntities.map { entity -> entity.asDashboardItem() },
-                            newestLoading = false
-                        )
-                    }
+                    playlistRepo.refreshAll()
+                    _uiState.update { it.copy(newestLoading = false) }
+                    // If the user asked for Get Caught Up to live on the phone, top it up now.
+                    runCatching { CatchUpDownloader.run(CastCharmApp.instance) }
                 } catch (e: Exception) {
                     sawAnyFailure = true
-                    Log.e("DashboardViewModel", "Failed to refresh newest episodes", e)
+                    Log.e("DashboardViewModel", "Failed to refresh playlists", e)
                     _uiState.update { it.copy(newestLoading = false) }
                 }
 

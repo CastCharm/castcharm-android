@@ -817,7 +817,11 @@ fun MainScaffold(
                             } else null,
                             isOfflineMode = isOfflineMode,
                             isReconnectInFlight = isReconnectInFlight,
-                            onRetryConnection = onReconnectRequest
+                            onRetryConnection = onReconnectRequest,
+                            onPlayMediaId = { mediaId ->
+                                playerController.playMediaId(mediaId)
+                                navController.navigateToPlayer()
+                            }
                         )
                     }
 
@@ -867,7 +871,8 @@ fun MainScaffold(
                             onPlayEpisode = { episodeId ->
                                 playerController.playEpisode(episodeId)
                                 navController.navigateToPlayer()
-                            }
+                            },
+                            onPlaybackStarted = { navController.navigateToPlayer() }
                         )
                     }
 
@@ -954,13 +959,8 @@ fun MainScaffold(
                             onViewPlaylist = { playlistId ->
                                 navController.navigateToPlaylistDetail(playlistId)
                             },
-                            onPlayPlaylist = { playlistId ->
-                                navController.navigateToPlaylistDetail(playlistId)
-                            },
-                            onEpisodeReady = { episodeId ->
-                                playerController.playEpisode(episodeId)
-                                navController.navigateToPlayer()
-                            }
+                            onPlaybackStarted = { navController.navigateToPlayer() },
+                            isOfflineMode = isOfflineMode
                         )
                     }
 
@@ -980,10 +980,7 @@ fun MainScaffold(
                         PlaylistDetailScreen(
                             playlistId = playlistId,
                             viewModel = vm,
-                            onPlayEpisode = { episodeId ->
-                                playerController.playEpisode(episodeId)
-                                navController.navigateToPlayer()
-                            },
+                            onPlaybackStarted = { navController.navigateToPlayer() },
                             onNavigateBack = { navController.popBackStack() },
                             isOfflineMode = isOfflineMode,
                             enablePlaylists = enablePlaylists

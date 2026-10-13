@@ -417,31 +417,18 @@ fun EpisodeListScreen(
     }
 
     if (showDeleteDownloadsConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDownloadsConfirm = false },
-            title = { Text("Delete downloads?") },
-            text = {
-                Text(
-                    "Remove the downloaded audio for the selected episodes from this " +
-                        "device. They'll remain available for streaming."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.deleteSelectedDownloads()
-                        showDeleteDownloadsConfirm = false
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    ),
-                ) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDownloadsConfirm = false }) {
-                    Text("Cancel")
-                }
-            }
+        val shared = uiState.selectedEpisodes.count { viewModel.sharedFromFeed(it).isNotEmpty() }
+        val total = uiState.selectedEpisodes.count { it in uiState.downloadedEpisodeIds }
+        com.castcharm.android.ui.shared_components.SharedDeleteDialog(
+            title = "Delete downloads?",
+            body = "Remove the downloaded audio for the selected episodes from this " +
+                "device. They'll remain available for streaming." +
+                com.castcharm.android.ui.shared_components.sharedFilesWarning(shared, total),
+            shared = shared > 0,
+            onDeleteEverywhere = { viewModel.deleteSelectedDownloads(everywhere = true); showDeleteDownloadsConfirm = false },
+            onRemoveHere = { viewModel.deleteSelectedDownloads(everywhere = false); showDeleteDownloadsConfirm = false },
+            onDismiss = { showDeleteDownloadsConfirm = false },
+            removeHereLabel = "Remove from this podcast only"
         )
     }
 
@@ -754,6 +741,7 @@ fun EpisodeListScreen(
                             onTogglePlayedStatus = { viewModel.togglePlayed(episode.id, episode.played) },
                             onDownloadToServer = { viewModel.downloadToServer(episode.id) },
                             onDownloadToDevice = { viewModel.downloadEpisode(episode.id) },
+                            sharedWith = viewModel.sharedFromFeed(episode.id),
                             downloadActionOverride = when {
                                 episode.local_path != null -> EpisodeDownloadActionOverride.ON_PHONE
                                 isPhoneDownloadInProgress -> EpisodeDownloadActionOverride.PHONE_IN_PROGRESS

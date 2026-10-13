@@ -126,10 +126,36 @@ class StorageManager(private val context: Context) {
         }
     }
 
+    /**
+     * Remove the file regardless of who wanted it: clears local_path/size (the
+     * server's status is untouched), releases artwork and forgets every owner.
+     */
+    suspend fun removeDownload(episodeId: Int): Boolean = withContext(Dispatchers.IO) {
+        val episode = episodeDao.getEpisodeOnce(episodeId) ?: return@withContext false
+        val db = AppDatabase.getDatabase(context)
+        db.downloadOwnerDao().removeAll(episodeId)
+        val path = episode.local_path ?: return@withContext false
+        val removed = File(path).let { if (it.exists()) it.delete() else false }
+        episodeDao.update(episode.copy(local_path = null, local_size_bytes = null))
+        releaseArtworkFor(episodeId, episode.feed_id)
+        removed
+    }
+
+    /**
+     * Drop one owner's claim. The file is deleted only when no owner remains;
+     * returns true in that case, false when something else still uses it.
+     */
+    suspend fun releaseOwner(episodeId: Int, owner: String): Boolean = withContext(Dispatchers.IO) {
+        val dao = AppDatabase.getDatabase(context).downloadOwnerDao()
+        dao.remove(episodeId, owner)
+        if (dao.ownersOf(episodeId).isEmpty()) { removeDownload(episodeId); true } else false
+    }
+
     // Deletes a single downloaded episode's file and clears its local_path/size
     // in the DB. Returns true if a file was actually removed. Used by the
     // batch-delete action on EpisodeListScreen.
     suspend fun deleteLocalFile(episodeId: Int): Boolean = withContext(Dispatchers.IO) {
+        AppDatabase.getDatabase(context).downloadOwnerDao().removeAll(episodeId)
         val episode = episodeDao.getEpisodeOnce(episodeId) ?: return@withContext false
         val path = episode.local_path ?: return@withContext false
         val file = File(path)
@@ -143,6 +169,7 @@ class StorageManager(private val context: Context) {
     // Used by the "Clear all downloads" button in SettingsScreen.
     suspend fun clearAllDownloads() = withContext(Dispatchers.IO) {
         val episodes = episodeDao.getDownloadedEpisodesOnce()
+        episodes.forEach { AppDatabase.getDatabase(context).downloadOwnerDao().removeAll(it.id) }
         for (episode in episodes) {
             episode.local_path?.let { path ->
                 File(path).delete()

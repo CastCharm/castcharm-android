@@ -228,7 +228,7 @@ class EpisodeRepository(
 
     // Shared write path for a batch of freshly fetched episodes: resolve each
     // against its existing row and the phone's download queue, then merge.
-    private suspend fun mergeRemoteEpisodes(remote: List<EpisodeOut>) {
+    suspend fun mergeRemoteEpisodes(remote: List<EpisodeOut>) {
         if (remote.isEmpty()) return
 
         val existingMap = remote

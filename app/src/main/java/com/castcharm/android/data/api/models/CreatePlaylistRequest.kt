@@ -9,5 +9,6 @@ const val PLAYLIST_DESC_MAX = 5000
 data class CreatePlaylistRequest(
     val name: String,
     val description: String? = null,
-    val type: String = "custom"
+    val type: String = "custom",
+    val rules: SmartRules? = null   // required for smart, forbidden for manual
 )

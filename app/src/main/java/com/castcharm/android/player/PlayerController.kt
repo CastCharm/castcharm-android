@@ -467,6 +467,20 @@ class PlayerController(private val context: Context) {
         updatePlaybackStateFromController()
     }
 
+    /**
+     * Hand the service a media id it knows how to expand into a queue
+     * ("playlist_<id>", "playlist_<id>_from_<episodeId>", "catchup_feed_<id>").
+     * The service decides online vs offline; the UI never has to.
+     */
+    fun playMediaId(mediaId: String) {
+        com.castcharm.android.diag.DiagLog.log("ui", "play $mediaId tapped in the app")
+        val controller = mediaController ?: return
+        controller.setMediaItem(MediaItem.Builder().setMediaId(mediaId).build())
+        controller.prepare()
+        controller.play()
+        updatePlaybackStateFromController()
+    }
+
     fun pause() {
         mediaController?.pause()
         updatePlaybackStateFromController()

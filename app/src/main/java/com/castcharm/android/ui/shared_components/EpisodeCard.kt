@@ -12,6 +12,7 @@ package com.castcharm.android.ui.shared_components
 // fields directly (local_path, status).
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
@@ -120,6 +121,9 @@ fun EpisodeCard(
     onAddToPlaylist: (() -> Unit)? = null,
     isInPlaylist: Boolean = false,
     enablePlaylists: Boolean = true,
+    // Names of playlists that also use this downloaded file. Shown next to the
+    // On Phone mark so deleting it from one place is not a surprise elsewhere.
+    sharedWith: List<String> = emptyList(),
     // True whenever multi-select is active, regardless of whether *this* row is
     // picked. Lets unselected rows show an empty checkbox, so the distinction is
     // between two obviously different marks rather than a background tint the user
@@ -363,6 +367,21 @@ fun EpisodeCard(
                                     modifier = Modifier.size(14.dp),
                                     tint = MaterialTheme.colorScheme.primary
                                 )
+                                if (sharedWith.isNotEmpty()) {
+                                    Icon(
+                                        Icons.Default.Link,
+                                        contentDescription = "Also in ${sharedWith.joinToString()}",
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.tertiary
+                                    )
+                                    Text(
+                                        text = if (sharedWith.size <= 2) "in ${sharedWith.joinToString(", ")}" else "in ${sharedWith.size} playlists",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
                             }
 
                             EpisodeDownloadActionOverride.SAVE_TO_PHONE -> {

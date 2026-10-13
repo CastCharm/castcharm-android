@@ -15,6 +15,8 @@
 package com.castcharm.android.ui.downloads
 
 import androidx.compose.foundation.background
+import com.castcharm.android.ui.shared_components.SharedDeleteDialog
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -90,7 +92,8 @@ import kotlinx.coroutines.launch
 fun DownloadsScreen(
     viewModel: DownloadsViewModel = viewModel(),
     onPlayEpisode: (episodeId: Int) -> Unit = {},
-    refreshToken: Int = 0
+    refreshToken: Int = 0,
+    onPlaybackStarted: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val isSelectionMode = uiState.selectedEpisodes.isNotEmpty()
@@ -130,76 +133,45 @@ fun DownloadsScreen(
     }
 
     if (showDeleteSelectedConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteSelectedConfirm = false },
-            title = { Text("Delete downloads?") },
-            text = { Text("Delete ${uiState.selectedEpisodes.size} downloaded file(s) from this device?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.deleteSelectedEpisodes()
-                        showDeleteSelectedConfirm = false
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteSelectedConfirm = false }) {
-                    Text("Cancel")
-                }
-            }
+        val ctx = viewModel.contextOwner()
+        val shared = uiState.selectedEpisodes.count { viewModel.sharedFrom(it, ctx).isNotEmpty() }
+        SharedDeleteDialog(
+            title = "Delete downloads?",
+            body = "Delete ${uiState.selectedEpisodes.size} downloaded file(s) from this device?" +
+                com.castcharm.android.ui.shared_components.sharedFilesWarning(shared, uiState.selectedEpisodes.size),
+            shared = shared > 0,
+            onDeleteEverywhere = { viewModel.deleteSelectedEpisodes(); showDeleteSelectedConfirm = false },
+            onRemoveHere = { viewModel.removeManyFromContext(uiState.selectedEpisodes, ctx); showDeleteSelectedConfirm = false },
+            onDismiss = { showDeleteSelectedConfirm = false }
         )
     }
 
     if (pendingFeedDelete != null) {
         val feedTitle = uiState.downloadedFeeds.find { it.feed.id == pendingFeedDelete }?.feed?.title ?: "this podcast"
-        AlertDialog(
-            onDismissRequest = { pendingFeedDelete = null },
-            title = { Text("Delete all downloads?") },
-            text = { Text("Delete all downloaded files for $feedTitle from this device?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.deleteFeedDownloads(pendingFeedDelete!!)
-                        pendingFeedDelete = null
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingFeedDelete = null }) {
-                    Text("Cancel")
-                }
-            }
+        val (shared, total) = viewModel.feedSharedCount(pendingFeedDelete!!)
+        SharedDeleteDialog(
+            title = "Delete all downloads?",
+            body = "Delete all downloaded files for $feedTitle from this device?" +
+                com.castcharm.android.ui.shared_components.sharedFilesWarning(shared, total),
+            shared = shared > 0,
+            onDeleteEverywhere = { viewModel.deleteFeedDownloads(pendingFeedDelete!!, everywhere = true); pendingFeedDelete = null },
+            onRemoveHere = { viewModel.deleteFeedDownloads(pendingFeedDelete!!, everywhere = false); pendingFeedDelete = null },
+            onDismiss = { pendingFeedDelete = null }
         )
     }
 
     if (pendingEpisodeDelete != null) {
         val episodeTitle = pendingEpisodeDelete?.title ?: "this episode"
-        AlertDialog(
-            onDismissRequest = { pendingEpisodeDelete = null },
-            title = { Text("Delete downloaded file?") },
-            text = { Text("Delete the local file for \"$episodeTitle\" from this device?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        pendingEpisodeDelete?.let { viewModel.deleteEpisodeDownload(it) }
-                        pendingEpisodeDelete = null
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingEpisodeDelete = null }) {
-                    Text("Cancel")
-                }
-            }
+        val ctx = viewModel.contextOwner()
+        val names = pendingEpisodeDelete?.let { viewModel.sharedFrom(it.id, ctx) } ?: emptyList()
+        SharedDeleteDialog(
+            title = "Delete downloaded file?",
+            body = "Delete the local file for \"$episodeTitle\" from this device?" +
+                com.castcharm.android.ui.shared_components.sharedFileWarning(names),
+            shared = names.isNotEmpty(),
+            onDeleteEverywhere = { pendingEpisodeDelete?.let { viewModel.deleteEpisodeDownload(it) }; pendingEpisodeDelete = null },
+            onRemoveHere = { pendingEpisodeDelete?.let { viewModel.removeFromContext(it.id, ctx) }; pendingEpisodeDelete = null },
+            onDismiss = { pendingEpisodeDelete = null }
         )
     }
 
@@ -219,6 +191,10 @@ fun DownloadsScreen(
                     if (isSelectionMode) {
                         IconButton(onClick = { viewModel.clearSelection() }) {
                             Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        }
+                    } else if (uiState.selectedPlaylistId != null) {
+                        IconButton(onClick = { viewModel.selectPlaylist(null) }) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                         }
                     } else if (uiState.selectedFeedId != null) {
                         IconButton(onClick = { viewModel.selectFeed(null) }) {
@@ -337,9 +313,48 @@ fun DownloadsScreen(
                     }
                 }
 
+                uiState.selectedPlaylistId != null -> {
+                    val pl = uiState.playlistDownloads.find { it.playlist.id == uiState.selectedPlaylistId }?.playlist
+                    var expandedEpisodeId by remember(uiState.selectedPlaylistId) { mutableStateOf<Int?>(null) }
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        item("header_playlist") {
+                            SectionHeader(
+                                title = pl?.name ?: "Playlist",
+                                subtitle = "${uiState.currentPlaylistEpisodes.size} episode${if (uiState.currentPlaylistEpisodes.size == 1) "" else "s"} on this phone · tap Play on a row to start there and keep going."
+                            )
+                        }
+                        items(items = uiState.currentPlaylistEpisodes, key = { "pl_saved_${it.id}" }) { episode ->
+                            val isSelected = uiState.selectedEpisodes.contains(episode.id)
+                            EpisodeCard(
+                                episode = episode,
+                                baseUrl = baseUrl,
+                                isSelected = isSelected,
+                                selectionActive = isSelectionMode,
+                                expanded = !isSelectionMode && expandedEpisodeId == episode.id,
+                                onToggleExpand = {
+                                    if (isSelectionMode) viewModel.toggleEpisodeSelection(episode.id)
+                                    else expandedEpisodeId = if (expandedEpisodeId == episode.id) null else episode.id
+                                },
+                                onLongPress = { if (!isSelectionMode) { expandedEpisodeId = null; viewModel.toggleEpisodeSelection(episode.id) } },
+                                onPlay = { pl?.let { viewModel.playPlaylistFrom(it.id, episode.id); onPlaybackStarted() } ?: onPlayEpisode(episode.id) },
+                                onTogglePlayedStatus = { viewModel.togglePlayed(episode.id, episode.played) },
+                                onDownloadToServer = {},
+                                onDownloadToDevice = {},
+                                onDeleteFromPhone = { pendingEpisodeDelete = episode },
+                                sharedWith = viewModel.sharedFrom(episode.id, viewModel.contextOwner()),
+                                downloadActionOverride = EpisodeDownloadActionOverride.ON_PHONE
+                            )
+                        }
+                    }
+                }
+
                 uiState.selectedFeedId == null -> {
                     if (
                         uiState.downloadedFeeds.isEmpty() &&
+                        uiState.playlistDownloads.isEmpty() &&
                         uiState.phoneInProgress.isEmpty() &&
                         uiState.serverInProgress.isEmpty()
                     ) {
@@ -349,7 +364,26 @@ fun DownloadsScreen(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(8.dp)
                         ) {
+                            if (uiState.playlistDownloads.isNotEmpty()) {
+                                item("header_playlists_root") {
+                                    SectionHeader(
+                                        title = "Playlists",
+                                        subtitle = "Playlists with episodes saved on this phone. They play offline, in order."
+                                    )
+                                }
+                                items(items = uiState.playlistDownloads, key = { "root_playlist_${it.playlist.id}" }) { item ->
+                                    PlaylistDownloadCard(
+                                        item = item,
+                                        onClick = { viewModel.selectPlaylist(item.playlist.id) },
+                                        onPlay = { viewModel.playPlaylist(item.playlist.id); onPlaybackStarted() }
+                                    )
+                                }
+                            }
+
                             if (uiState.downloadedFeeds.isNotEmpty()) {
+                                if (uiState.playlistDownloads.isNotEmpty()) {
+                                    item("divider_after_playlists") { HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp)) }
+                                }
                                 item("header_saved_phone_root") {
                                     SectionHeader(
                                         title = "Saved on Phone",
@@ -488,6 +522,7 @@ fun DownloadsScreen(
                                         onDownloadToServer = {},
                                         onDownloadToDevice = {},
                                         onDeleteFromPhone = { pendingEpisodeDelete = episode },
+                                        sharedWith = viewModel.sharedFrom(episode.id, com.castcharm.android.download.DownloadOwners.FEED),
                                         downloadActionOverride = EpisodeDownloadActionOverride.ON_PHONE
                                     )
                                 }
@@ -929,6 +964,45 @@ private fun InProgressDownloadSkeleton() {
                         .semantics { contentDescription = "Loading" },
                     strokeWidth = 2.dp
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaylistDownloadCard(
+    item: PlaylistDownloadItem,
+    onClick: () -> Unit,
+    onPlay: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            com.castcharm.android.ui.playlists.PlaylistKindIcon(item.playlist.isSmart, Modifier.size(32.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.playlist.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${if (item.playlist.isSmart) "Smart" else "Manual"} · ${item.onPhoneCount} episode${if (item.onPhoneCount == 1) "" else "s"} on phone",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onPlay) {
+                Icon(Icons.Default.PlayArrow, contentDescription = "Play playlist")
             }
         }
     }

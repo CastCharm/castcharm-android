@@ -34,6 +34,8 @@ package com.castcharm.android.player
 //   with no access to the app's authenticated OkHttpClient.
 
 import android.app.PendingIntent
+import com.castcharm.android.data.db.entities.PlaylistEntity
+import com.castcharm.android.data.repository.PlaylistRepository
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -126,6 +128,19 @@ private const val SECTION_PODCASTS = "section_podcasts"
 private const val SECTION_DOWNLOADS = "section_downloads"
 // "Continue" row at the top of a listen-in-order feed; expands to that feed's queue.
 private const val CATCHUP_PREFIX = "catchup_feed_"
+// Playlists in the browse tree and as playable queues.
+private const val SECTION_CATCHUP = "section_catchup"        // the built-in "Get Caught Up" members
+private const val SECTION_PLAYLISTS = "section_playlists"    // the other playlists, as folders
+private const val PLAYLIST_NODE_PREFIX = "plnode_"           // browsable: plnode_<id>
+private const val PLAYLIST_PLAY_PREFIX = "playlist_"         // playable: playlist_<id> | playlist_<id>_from_<episodeId>
+
+private fun parsePlaylistPlayId(mediaId: String): Pair<Int, Int?>? {
+    if (!mediaId.startsWith(PLAYLIST_PLAY_PREFIX)) return null
+    val rest = mediaId.removePrefix(PLAYLIST_PLAY_PREFIX)
+    val id = rest.substringBefore("_from_").toIntOrNull() ?: return null
+    val from = if ("_from_" in rest) rest.substringAfter("_from_").toIntOrNull() else null
+    return id to from
+}
 // How many episodes to put in the player's timeline after the one that starts.
 // Enough to listen for hours; small enough that artwork and resolution stay cheap.
 private const val IN_ORDER_QUEUE_LIMIT = 25
@@ -247,15 +262,27 @@ private fun extractBaseFeedTitle(metadata: MediaMetadata): String {
 // Offline mode shows only Downloads since network-dependent sections would be empty.
 private fun visibleRootSections(isOffline: Boolean): List<String> {
     return if (isOffline) {
-        listOf(SECTION_DOWNLOADS)
+        // Playlists are evaluated over the phone's own files offline.
+        listOf(SECTION_CATCHUP, SECTION_PLAYLISTS, SECTION_DOWNLOADS)
     } else {
         listOf(
+            SECTION_CATCHUP,
             SECTION_CONTINUE,
             SECTION_RECENT,
             SECTION_PODCASTS,
+            SECTION_PLAYLISTS,
             SECTION_DOWNLOADS
         )
     }
+}
+
+private fun sectionTitle(id: String): String = when (id) {
+    SECTION_CATCHUP -> "Get Caught Up"
+    SECTION_CONTINUE -> "Continue"
+    SECTION_RECENT -> "Recent"
+    SECTION_PODCASTS -> "Podcasts"
+    SECTION_PLAYLISTS -> "Playlists"
+    else -> "Downloads"
 }
 
 // Returns true if the given Android Auto section parentId should be hidden
@@ -335,6 +362,10 @@ private data class BrowseSnapshot(
     val podcastsTop: Int?,
     val downloadsCount: Int,
     val downloadsTop: Int?,
+    val catchupCount: Int = 0,
+    val catchupTop: Int? = null,
+    val playlistsCount: Int = 0,
+    val playlistsTop: Int? = null,
 )
 
 @OptIn(UnstableApi::class)
@@ -796,6 +827,9 @@ class PlayerService : MediaLibraryService() {
         runCatching { episodeRepo.fetchAndCacheContinueListening() }
             .onFailure { Log.w(TAG, "AA browse refresh: continue-listening failed", it) }
 
+        runCatching { PlaylistRepository(db).refreshAll() }
+            .onFailure { Log.w(TAG, "AA browse refresh: playlists failed", it); DiagLog.log("aa", "browse refresh: playlists failed: ${it.message}") }
+
         // Recent episodes across every feed. mergeFromApi preserves phone-only
         // fields (local_path, download progress, pending-sync flags) so this
         // never clobbers a download in flight.
@@ -844,6 +878,9 @@ class PlayerService : MediaLibraryService() {
         val recentList = if (isOffline) emptyList() else db.episodeDao().getRecentEpisodesOnce(limit = 200)
         val feedList = if (isOffline) emptyList() else db.feedDao().getFeedOnceAll()
         val downloadList = db.episodeDao().getDownloadedEpisodesOnce()
+        val plRepo = PlaylistRepository(db)
+        val catchup = plRepo.systemPlaylistOnce()?.let { plRepo.membersOnce(it.id, localOnly = isOffline) } ?: emptyList()
+        val playlists = db.playlistDao().getAllOnce().filter { !it.is_system }
 
         return BrowseSnapshot(
             isOffline = isOffline,
@@ -856,6 +893,10 @@ class PlayerService : MediaLibraryService() {
             podcastsTop = feedList.firstOrNull()?.id,
             downloadsCount = downloadList.size,
             downloadsTop = downloadList.firstOrNull()?.id,
+            catchupCount = catchup.size,
+            catchupTop = catchup.firstOrNull()?.id,
+            playlistsCount = playlists.size,
+            playlistsTop = playlists.firstOrNull()?.id,
         )
     }
 
@@ -867,11 +908,18 @@ class PlayerService : MediaLibraryService() {
             // Going online or offline adds/removes whole sections; the root and
             // everything under it genuinely has to be re-read.
             return setOf(
-                ROOT_ID, SECTION_CONTINUE, SECTION_RECENT, SECTION_PODCASTS, SECTION_DOWNLOADS
+                ROOT_ID, SECTION_CATCHUP, SECTION_CONTINUE, SECTION_RECENT, SECTION_PODCASTS,
+                SECTION_PLAYLISTS, SECTION_DOWNLOADS
             )
         }
         val nodes = mutableSetOf<String>()
         if (before.rootCount != after.rootCount) nodes += ROOT_ID
+        if (before.catchupCount != after.catchupCount || before.catchupTop != after.catchupTop) {
+            nodes += SECTION_CATCHUP
+        }
+        if (before.playlistsCount != after.playlistsCount || before.playlistsTop != after.playlistsTop) {
+            nodes += SECTION_PLAYLISTS
+        }
         if (before.continueCount != after.continueCount || before.continueTop != after.continueTop) {
             nodes += SECTION_CONTINUE
         }
@@ -1017,7 +1065,7 @@ class PlayerService : MediaLibraryService() {
                                 !existing.played && existing.play_position_seconds > 0
                         val nowInContinue = !targetPlayed && positionSeconds > 0
                         if (playedFlipped || wasInContinue != nowInContinue) {
-                            notifyBrowseNodes(setOf(SECTION_CONTINUE))
+                            notifyBrowseNodes(if (playedFlipped) setOf(SECTION_CONTINUE, SECTION_CATCHUP) else setOf(SECTION_CONTINUE))
                         }
                     } catch (_: Exception) {
                         // Server call failed — write to DB with pending=true so
@@ -1069,7 +1117,7 @@ class PlayerService : MediaLibraryService() {
             // The episode just left Continue Listening. Deliberately not notifying
             // the feed node: updating one played marker is not worth throwing away
             // the scroll position of someone browsing that feed.
-            notifyBrowseNodes(setOf(SECTION_CONTINUE))
+            notifyBrowseNodes(setOf(SECTION_CONTINUE, SECTION_CATCHUP))
         } catch (_: Exception) {
             db.episodeDao().updatePlayedStatus(episodeId, true, now, pending = true)
         }
@@ -1092,13 +1140,31 @@ class PlayerService : MediaLibraryService() {
         for (node in nodes) {
             // Network-backed sections are hidden entirely while offline; notifying
             // them would just make the head unit re-read an empty list.
-            if (isOffline && node != ROOT_ID && node != SECTION_DOWNLOADS) continue
+            if (isOffline && node != ROOT_ID && node != SECTION_DOWNLOADS &&
+                node != SECTION_CATCHUP && node != SECTION_PLAYLISTS && !node.startsWith(PLAYLIST_NODE_PREFIX)) continue
 
             when {
                 node == ROOT_ID ->
                     session.notifyChildrenChanged(
                         ROOT_ID, visibleRootSections(isOffline).size, browseLibraryParams()
                     )
+                node == SECTION_CATCHUP -> {
+                    val repo = PlaylistRepository(db)
+                    val n = repo.systemPlaylistOnce()?.let { repo.membersOnce(it.id, localOnly = isOffline).size } ?: 0
+                    session.notifyChildrenChanged(node, n + 1, playableLibraryParams())
+                }
+                node == SECTION_PLAYLISTS ->
+                    session.notifyChildrenChanged(
+                        node, db.playlistDao().getAllOnce().count { !it.is_system }, browsableLibraryParams()
+                    )
+                node.startsWith(PLAYLIST_NODE_PREFIX) -> {
+                    val id = node.removePrefix(PLAYLIST_NODE_PREFIX).toIntOrNull()
+                    if (id != null) {
+                        session.notifyChildrenChanged(
+                            node, PlaylistRepository(db).membersOnce(id, localOnly = isOffline).size + 1, playableLibraryParams()
+                        )
+                    }
+                }
                 node == SECTION_DOWNLOADS ->
                     session.notifyChildrenChanged(
                         node, db.episodeDao().getDownloadedEpisodesOnce().size, playableLibraryParams()
@@ -1200,6 +1266,7 @@ private class PlayerLibrarySessionCallback(
     private val awaitBrowseRefresh: suspend () -> Unit = {},
 ) : MediaLibraryService.MediaLibrarySession.Callback {
 
+    private val db: AppDatabase by lazy { AppDatabase.getDatabase(context) }
     private val connectedControllers = linkedSetOf<MediaSession.ControllerInfo>()
 
     // The server context the current queue was built from, so the service can
@@ -1348,6 +1415,9 @@ private class PlayerLibrarySessionCallback(
                 parentId == SECTION_RECENT -> true
                 parentId == SECTION_DOWNLOADS -> true
                 parentId == SECTION_PODCASTS -> true
+                parentId == SECTION_CATCHUP -> true
+                parentId == SECTION_PLAYLISTS -> true
+                parentId.startsWith(PLAYLIST_NODE_PREFIX) -> true
                 parentId.startsWith(CATCHUP_PREFIX) -> true
                 parentId.startsWith("feed_") -> {
                     val id = parentId.removePrefix("feed_").toIntOrNull()
@@ -1403,6 +1473,24 @@ private class PlayerLibrarySessionCallback(
                 mediaId == SECTION_RECENT -> section(context, SECTION_RECENT, "Recent")
                 mediaId == SECTION_DOWNLOADS -> section(context, SECTION_DOWNLOADS, "Downloads")
                 mediaId == SECTION_PODCASTS -> section(context, SECTION_PODCASTS, "Podcasts")
+                mediaId == SECTION_CATCHUP -> section(context, SECTION_CATCHUP, sectionTitle(SECTION_CATCHUP))
+                mediaId == SECTION_PLAYLISTS -> section(context, SECTION_PLAYLISTS, sectionTitle(SECTION_PLAYLISTS))
+                mediaId.startsWith(PLAYLIST_NODE_PREFIX) -> {
+                    val pl = mediaId.removePrefix(PLAYLIST_NODE_PREFIX).toIntOrNull()?.let { db.playlistDao().getOnce(it) }
+                        ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    createPlaylistNode(pl)
+                }
+                parsePlaylistPlayId(mediaId) != null -> {
+                    val (plId, from) = parsePlaylistPlayId(mediaId)!!
+                    val pl = db.playlistDao().getOnce(plId)
+                        ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    if (from == null) createPlaylistPlayAllItem(pl)
+                    else {
+                        val ep = episodeDao.getEpisodeOnce(from)
+                            ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                        createEpisodeItem(ep, feedDao.getFeedOnce(ep.feed_id)?.title, mediaId = mediaId)
+                    }
+                }
                 mediaId.startsWith(CATCHUP_PREFIX) -> {
                     val feedId = mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull()
                         ?: return@asyncFuture LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
@@ -1457,7 +1545,9 @@ private class PlayerLibrarySessionCallback(
             // and available with no server at all.
             if (parentId == SECTION_CONTINUE ||
                 parentId == SECTION_RECENT ||
-                parentId == SECTION_PODCASTS
+                parentId == SECTION_PODCASTS ||
+                parentId == SECTION_CATCHUP ||
+                parentId == SECTION_PLAYLISTS
             ) {
                 awaitBrowseRefresh()
             }
@@ -1468,15 +1558,28 @@ private class PlayerLibrarySessionCallback(
             when {
                 parentId == ROOT_ID -> {
                     allItems = visibleRootSections(CastCharmApp.isOfflineMode).map { sectionId ->
-                        when (sectionId) {
-                            SECTION_CONTINUE -> section(context, SECTION_CONTINUE, "Continue")
-                            SECTION_RECENT -> section(context, SECTION_RECENT, "Recent")
-                            SECTION_PODCASTS -> section(context, SECTION_PODCASTS, "Podcasts")
-                            SECTION_DOWNLOADS -> section(context, SECTION_DOWNLOADS, "Downloads")
-                            else -> section(context, SECTION_DOWNLOADS, "Downloads")
-                        }
+                        section(context, sectionId, sectionTitle(sectionId))
                     }
                     resultParams = browseLibraryParams()
+                }
+
+                parentId == SECTION_CATCHUP -> {
+                    val repo = PlaylistRepository(db)
+                    val pl = repo.systemPlaylistOnce()
+                    allItems = if (pl == null) emptyList() else playlistRows(pl, repo)
+                    resultParams = playableLibraryParams()
+                }
+
+                parentId == SECTION_PLAYLISTS -> {
+                    allItems = db.playlistDao().getAllOnce().filter { !it.is_system }.map { createPlaylistNode(it) }
+                    resultParams = browsableLibraryParams()
+                }
+
+                parentId.startsWith(PLAYLIST_NODE_PREFIX) -> {
+                    val repo = PlaylistRepository(db)
+                    val pl = parentId.removePrefix(PLAYLIST_NODE_PREFIX).toIntOrNull()?.let { db.playlistDao().getOnce(it) }
+                    allItems = if (pl == null) emptyList() else playlistRows(pl, repo)
+                    resultParams = playableLibraryParams()
                 }
 
                 parentId == SECTION_PODCASTS -> {
@@ -1735,6 +1838,7 @@ private class PlayerLibrarySessionCallback(
         if (items.size != 1) return null
         val original = items[0]
         val mediaId = original.mediaId
+        parsePlaylistPlayId(mediaId)?.let { (plId, from) -> return expandPlaylistQueue(original, plId, from) }
         val tappedId: Int?
         val feedId: Int
         if (mediaId.startsWith(CATCHUP_PREFIX)) {
@@ -1822,6 +1926,119 @@ private class PlayerLibrarySessionCallback(
     }
 
     /**
+     * A playlist as a queue, manual or smart. Online the server decides (its
+     * resume rule: the episode left part-way, else the first unplayed) and
+     * supplies the order; offline, or when the server cannot be reached, the
+     * phone evaluates the same playlist over its own files.
+     */
+    private suspend fun expandPlaylistQueue(original: MediaItem, playlistId: Int, tappedId: Int?): Pair<List<MediaItem>, Int>? {
+        val repo = PlaylistRepository(db)
+        val pl = repo.playlistOnce(playlistId)
+        val online = !CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized
+        var ids: List<Int> = emptyList()
+        var start = 0
+        if (online) {
+            try {
+                val state = CastCharmApp.apiClient.getApi().playerPlay(
+                    PlayerPlayRequest(context_type = "playlist", context_id = playlistId, episode_id = tappedId)
+                )
+                activeContext = PlayerPlayRequest(context_type = "playlist", context_id = playlistId)
+                val queueIds = state.queue.map { it.id }
+                val currentId = tappedId ?: state.current_episode?.id
+                ids = when {
+                    currentId == null -> queueIds
+                    currentId in queueIds -> queueIds
+                    else -> listOf(currentId) + queueIds
+                }
+                start = maxOf(0, ids.indexOf(currentId))
+                DiagLog.log("queue", "playlist $playlistId ('${pl?.name}'): server queue ${queueIds.size} item(s), start $currentId")
+            } catch (e: Exception) {
+                DiagLog.log("queue", "playlist $playlistId: server unreachable (${e.javaClass.simpleName}); deciding locally")
+            }
+        }
+        if (ids.isEmpty()) {
+            activeContext = null
+            val local = repo.membersOnce(playlistId, localOnly = !online)
+            val localIds = local.map { it.id }
+            // Same rule as the server's _smart_start: the one left part-way, else
+            // the first unplayed in the playlist's own order, else the first.
+            val startId = tappedId
+                ?: local.filter { !it.played && it.play_position_seconds > 0 }.maxByOrNull { it.last_played_at ?: 0L }?.id
+                ?: local.firstOrNull { !it.played }?.id
+                ?: localIds.firstOrNull()
+            DiagLog.log("queue", "playlist $playlistId ('${pl?.name}'): local members ${localIds.size}, start ${startId ?: "none"}")
+            if (startId == null) return null
+            ids = if (startId in localIds) localIds else listOf(startId) + localIds
+            start = ids.indexOf(startId)
+        }
+        val tailEnd = minOf(ids.size, start + 1 + IN_ORDER_QUEUE_LIMIT)
+        val window = ids.subList(start, tailEnd)
+        if (online) {
+            val missing = window.filter { episodeDao.getEpisodeOnce(it) == null }
+            if (missing.isNotEmpty()) {
+                val erepo = EpisodeRepository(CastCharmApp.apiClient.getApi(), episodeDao)
+                for (id in missing) runCatching { erepo.fetchEpisodeFromApi(id) }
+            }
+        }
+        val built = window.mapIndexed { i, id ->
+            if (i == 0) original.buildUpon().setMediaId("episode_$id").build()
+            else MediaItem.Builder().setMediaId("episode_$id").build()
+        }
+        return built to 0
+    }
+
+    /** "Play all · N episodes" row followed by the members, each playable as
+     *  "start here and keep going". */
+    private suspend fun playlistRows(pl: PlaylistEntity, repo: PlaylistRepository): List<MediaItem> {
+        val members = repo.membersOnce(pl.id, localOnly = CastCharmApp.isOfflineMode)
+        val feedMap = feedDao.getFeedOnceAll().associateBy { it.id }
+        scope.launch {
+            members.map { it.feed_id }.distinct().take(12).forEach { id ->
+                runCatching { PodcastArtworkProvider.prefetchFeedArtwork(context, id) }
+            }
+        }
+        return listOf(createPlaylistPlayAllItem(pl, members.size)) +
+            members.map { ep -> createEpisodeItem(ep, feedMap[ep.feed_id]?.title, mediaId = "$PLAYLIST_PLAY_PREFIX${pl.id}_from_${ep.id}") }
+    }
+
+    private suspend fun createPlaylistPlayAllItem(pl: PlaylistEntity, count: Int? = null): MediaItem {
+        val n = count ?: PlaylistRepository(db).membersOnce(pl.id, localOnly = CastCharmApp.isOfflineMode).size
+        val title = if (n == 0) "Nothing to play" else "Play all · $n episode${if (n == 1) "" else "s"}"
+        return MediaItem.Builder()
+            .setMediaId("$PLAYLIST_PLAY_PREFIX${pl.id}")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setDisplayTitle(title)
+                    .setSubtitle(pl.name)
+                    .setArtist(pl.name)
+                    .setIsBrowsable(false)
+                    .setIsPlayable(n > 0)
+                    .setMediaType(MediaMetadata.MEDIA_TYPE_PLAYLIST)
+                    .build()
+            )
+            .build()
+    }
+
+    private suspend fun createPlaylistNode(pl: PlaylistEntity): MediaItem {
+        val n = PlaylistRepository(db).membersOnce(pl.id, localOnly = CastCharmApp.isOfflineMode).size
+        val kind = if (pl.isSmart) "Smart" else "Manual"
+        return MediaItem.Builder()
+            .setMediaId("$PLAYLIST_NODE_PREFIX${pl.id}")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(pl.name)
+                    .setDisplayTitle(pl.name)
+                    .setSubtitle("$kind · $n episode${if (n == 1) "" else "s"}")
+                    .setIsBrowsable(true)
+                    .setIsPlayable(false)
+                    .setMediaType(MediaMetadata.MEDIA_TYPE_PLAYLIST)
+                    .build()
+            )
+            .build()
+    }
+
+    /**
      * Playlist (and ordinary-feed) queues: the screen already called
      * /api/player/play, so the server's current episode is the one being
      * started.  Load the rest of that queue behind it.  A stale context whose
@@ -1883,6 +2100,9 @@ private class PlayerLibrarySessionCallback(
     }
 
     private suspend fun canPlayOffline(item: MediaItem): Boolean {
+        parsePlaylistPlayId(item.mediaId)?.let { (plId, _) ->
+            return PlaylistRepository(db).localMembersOnce(plId).isNotEmpty()
+        }
         if (item.mediaId.startsWith(CATCHUP_PREFIX)) {
             val feedId = item.mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull() ?: return false
             return episodeDao.getInOrderQueueLocal(feedId).isNotEmpty()
@@ -1985,12 +2205,12 @@ private class PlayerLibrarySessionCallback(
             .build()
     }
 
-    private fun createEpisodeItem(ep: EpisodeEntity, feedName: String?): MediaItem {
+    private fun createEpisodeItem(ep: EpisodeEntity, feedName: String?, mediaId: String = "episode_${ep.id}"): MediaItem {
         val feedTitle = feedName ?: "Unknown Podcast"
         val artworkUri = resolveEpisodeArtworkUri(context, ep)
 
         return MediaItem.Builder()
-            .setMediaId("episode_${ep.id}")
+            .setMediaId(mediaId)
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(ep.title)

@@ -73,13 +73,18 @@ fun withFeedCoverToken(url: String?, feedUrl: String?): String? {
 // string (H:MM:SS or MM:SS from RSS feed data). Both forms are normalized to seconds.
 fun parseDuration(value: String?): Int? {
     if (value.isNullOrBlank()) return null
-    return value.toIntOrNull() ?: run {
-        val parts = value.split(":").mapNotNull { it.trim().toIntOrNull() }
-        when (parts.size) {
-            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
-            2 -> parts[0] * 60 + parts[1]
-            else -> null
-        }
+    val s = value.trim()
+    // Mirrors the server's _parse_seconds (app/routers/stats.py): plain
+    // integer or float seconds, or H:MM:SS / MM:SS where the seconds part may
+    // carry a fraction. Anything else is unknown, not zero, so callers decide.
+    s.toDoubleOrNull()?.let { return it.toInt() }
+    val parts = s.split(":").map { it.trim() }
+    if (parts.any { it.isEmpty() }) return null
+    val nums = parts.map { it.toDoubleOrNull() ?: return null }
+    return when (nums.size) {
+        3 -> (nums[0] * 3600 + nums[1] * 60 + nums[2]).toInt()
+        2 -> (nums[0] * 60 + nums[1]).toInt()
+        else -> null
     }
 }
 
