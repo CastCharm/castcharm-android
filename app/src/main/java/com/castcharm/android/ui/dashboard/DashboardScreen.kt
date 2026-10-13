@@ -436,7 +436,7 @@ private fun GetCaughtUpCard(
                     },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                val shown = if (showAll) items else items.take(8)
+                val shown = if (showAll) items else items.take(5)
                 shown.forEach { item ->
                     EpisodeRow(
                         episode = item.episode,
@@ -446,9 +446,9 @@ private fun GetCaughtUpCard(
                         onPlayClick = { onPlayItem(item.episode) }
                     )
                 }
-                if (items.size > 8) {
+                if (items.size > 5) {
                     TextButton(onClick = { showAll = !showAll }) {
-                        Text(if (showAll) "Show fewer" else "Show ${items.size - 8} more")
+                        Text(if (showAll) "Show fewer" else "Show ${items.size - 5} more")
                     }
                 }
             }
