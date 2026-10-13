@@ -97,6 +97,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        com.castcharm.android.diag.DiagLog.init(this)
         apiClient = ApiClient(this)
         playerController = PlayerController(this)
         appSessionManager = AppSessionManager(this)

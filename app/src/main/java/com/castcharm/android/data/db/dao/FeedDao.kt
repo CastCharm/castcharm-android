@@ -55,6 +55,9 @@ interface FeedDao {
     @Query("SELECT * FROM feeds WHERE id = :feedId")
     suspend fun getFeedOnce(feedId: Int): FeedEntity?
 
+    @Query("UPDATE feeds SET next_up_episode_id = :episodeId, next_up_position = :position WHERE id = :feedId")
+    suspend fun updateNextUp(feedId: Int, episodeId: Int?, position: Int?)
+
     @Query("SELECT * FROM feeds WHERE active = 1 ORDER BY title ASC")
     fun getActiveFeeds(): Flow<List<FeedEntity>>
 

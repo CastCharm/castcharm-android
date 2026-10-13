@@ -31,7 +31,11 @@ data class FeedEntity(
     // (falls back to 1.0× at playback time). Written by PlayerViewModel on speed change.
     val playback_speed: Float? = null,
     // Synced from the server: "oldest" = listen in order (story/serial), else newest first.
-    val play_order: String? = null
+    val play_order: String? = null,
+    // What the server said "Continue" should play for this feed, cached at the
+    // last refresh so the car can resume the right episode without a network.
+    val next_up_episode_id: Int? = null,
+    val next_up_position: Int? = null
 ) {
     val listenInOrder: Boolean get() = play_order == "oldest"
 }

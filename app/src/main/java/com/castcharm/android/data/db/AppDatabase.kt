@@ -26,7 +26,7 @@ import com.castcharm.android.data.db.entities.FeedEntity
 
 @Database(
     entities = [FeedEntity::class, EpisodeEntity::class, DownloadEntity::class],
-    version = 5
+    version = 6
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun feedDao(): FeedDao
@@ -41,6 +41,14 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE feeds ADD COLUMN play_order TEXT")
+            }
+        }
+
+        // 5 → 6: feeds.next_up_* (the server's resume point, cached for offline).
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE feeds ADD COLUMN next_up_episode_id INTEGER")
+                db.execSQL("ALTER TABLE feeds ADD COLUMN next_up_position INTEGER")
             }
         }
 
@@ -64,7 +72,7 @@ abstract class AppDatabase : RoomDatabase() {
                     // Known schema steps migrate in place so local_path links and
                     // unsynced offline progress survive an update. The destructive
                     // fallback only covers a jump no migration describes.
-                    .addMigrations(MIGRATION_4_5)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

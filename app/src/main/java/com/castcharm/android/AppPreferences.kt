@@ -30,6 +30,11 @@ val NOTIFY_NEW_EPISODES_KEY = booleanPreferencesKey("notify_new_episodes")
 // and eligible for notification.
 val LAST_NOTIFIED_EPISODE_ID_KEY = longPreferencesKey("last_notified_episode_id")
 
+// Playback: the episode most recently loaded in the player. Lets a
+// chronological feed resume where it was when the server cannot be reached
+// (see NextUpResolver), instead of jumping to a different episode.
+val LAST_PLAYING_EPISODE_ID_KEY = longPreferencesKey("last_playing_episode_id")
+
 // Bandwidth tracking: cumulative bytes for the current month. Reset when the
 // stored month string doesn't match today's YYYY-MM.
 val BANDWIDTH_BYTES_KEY = longPreferencesKey("bandwidth_bytes_current_month")

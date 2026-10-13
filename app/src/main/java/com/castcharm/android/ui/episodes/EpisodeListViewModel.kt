@@ -11,6 +11,9 @@ package com.castcharm.android.ui.episodes
 //     and surfaces an error rather than showing a stale empty list.
 
 import android.util.Log
+import kotlinx.coroutines.flow.first
+import com.castcharm.android.dataStore
+import com.castcharm.android.LAST_PLAYING_EPISODE_ID_KEY
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.castcharm.android.CastCharmApp
@@ -498,12 +501,13 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
             val fromServer = if (askServer && !CastCharmApp.isOfflineMode && CastCharmApp.apiClient.isInitialized) {
                 lastNextUpFetchMs = now
                 runCatching { CastCharmApp.apiClient.getApi().getFeed(feedId).next_up }.getOrNull()
+                    ?.also { db.feedDao().updateNextUp(feedId, it.episode_id, it.position_seconds) }
                     ?.let { NextUp(it.episode_id, it.seq_number, it.title, it.position_seconds, it.resume) }
             } else null
             val next = fromServer ?: run {
-                val ep = db.episodeDao().getInProgressForFeed(feedId)
-                    ?: (if (CastCharmApp.isOfflineMode) db.episodeDao().getInOrderQueueLocal(feedId)
-                        else db.episodeDao().getInOrderQueue(feedId)).firstOrNull()
+                val lastPlaying = runCatching { CastCharmApp.instance.dataStore.data.first()[LAST_PLAYING_EPISODE_ID_KEY]?.toInt() }.getOrNull()
+                val ep = com.castcharm.android.data.repository.NextUpResolver
+                    .resolve(feed, db.episodeDao(), lastPlaying, CastCharmApp.isOfflineMode)?.episode
                 ep?.let { NextUp(it.id, it.seq_number, it.title, it.play_position_seconds, it.play_position_seconds > 0) }
             }
             _uiState.update { it.copy(nextUp = next) }

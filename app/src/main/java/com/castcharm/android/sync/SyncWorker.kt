@@ -84,6 +84,18 @@ class SyncWorker(
         runCatching { NewEpisodesNotifier.maybeNotify(applicationContext, api) }
             .onFailure { Log.w("SyncWorker", "New-episodes check failed", it) }
 
+        // Keep the server's resume point for chronological feeds cached, so the
+        // car can start the right episode even when the next drive begins out
+        // of range of the server.
+        runCatching {
+            val feedDao = AppDatabase.getDatabase(applicationContext).feedDao()
+            val feedRepo = com.castcharm.android.data.repository.FeedRepository(api, feedDao)
+            val episodeRepo = com.castcharm.android.data.repository.EpisodeRepository(api, dao)
+            feedDao.getFeedOnceAll().filter { it.listenInOrder }.take(20).forEach { f ->
+                runCatching { feedRepo.refreshNextUp(f.id, episodeRepo) }
+            }
+        }.onFailure { Log.w("SyncWorker", "Next-up refresh failed", it) }
+
         // Housekeeping that needs the server: re-link any downloaded files the
         // local table lost track of, and restart any stalled download queue.
         runCatching { com.castcharm.android.download.StorageManager(applicationContext).reconcileOrphanFiles(api) }

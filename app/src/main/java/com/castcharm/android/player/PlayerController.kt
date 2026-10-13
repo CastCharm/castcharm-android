@@ -290,6 +290,7 @@ class PlayerController(private val context: Context) {
     // Public entry point used by PlayerViewModel and Android Auto. Runs
     // buildEpisodePlaybackRequest() on IO then hands off to playUri() on Main.
     fun playEpisode(episodeId: Int) {
+        com.castcharm.android.diag.DiagLog.log("ui", "play episode $episodeId tapped in the app")
         playJob?.cancel()
         playJob = scope.launch {
             try {

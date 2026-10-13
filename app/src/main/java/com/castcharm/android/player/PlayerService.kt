@@ -39,6 +39,10 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import androidx.media3.common.PlaybackException
+import androidx.datastore.preferences.core.edit
+import com.castcharm.android.LAST_PLAYING_EPISODE_ID_KEY
+import com.castcharm.android.data.repository.NextUpResolver
 import androidx.annotation.OptIn
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.media3.common.AudioAttributes
@@ -110,6 +114,7 @@ import java.util.concurrent.TimeUnit
 
 // Log tag shared by both PlayerService and PlayerLibrarySessionCallback.
 private const val TAG = "CastCharm"
+private typealias DiagLog = com.castcharm.android.diag.DiagLog
 
 // Browse tree node IDs used in the Android Auto MediaLibrarySession.
 // These string constants must match what Android Auto sends back in parentId
@@ -358,6 +363,7 @@ class PlayerService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "PlayerService.onCreate start")
+        DiagLog.log("service", "created (app ${com.castcharm.android.BuildConfig.VERSION_NAME}, offline=${CastCharmApp.isOfflineMode})")
         ensureSessionReady()
     }
 
@@ -506,6 +512,7 @@ class PlayerService : MediaLibraryService() {
         player.addListener(object : Player.Listener {
                 // Start/stop the 1-second progress sync loop in sync with play/pause.
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    DiagLog.log("player", "${if (isPlaying) "playing" else "paused"} ${player.currentMediaItem?.mediaId ?: "none"} at ${player.currentPosition / 1000}s")
                     if (isPlaying) startProgressTracking() else stopProgressTracking()
                 }
 
@@ -517,6 +524,9 @@ class PlayerService : MediaLibraryService() {
                     lastTransitionMs = System.currentTimeMillis()
                     val transitionedId = mediaItem?.mediaId
                     val epId = transitionedId?.removePrefix("episode_")?.toIntOrNull()
+                    DiagLog.log("player", "transition → ${transitionedId ?: "none"} reason=${transitionReason(reason)} " +
+                        "index=${player.currentMediaItemIndex}/${player.mediaItemCount} pos=${player.currentPosition / 1000}s")
+                    if (epId != null) rememberLastPlaying(epId)
                     if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
                         // Fresh set: the speed baked into the item at resolve time
                         // is current, and the start position was chosen already.
@@ -569,6 +579,7 @@ class PlayerService : MediaLibraryService() {
                 ) {
                     if (reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) return
                     val finishedId = oldPosition.mediaItem?.mediaId?.removePrefix("episode_")?.toIntOrNull() ?: return
+                    DiagLog.log("player", "episode $finishedId reached its end at ${oldPosition.positionMs / 1000}s → marking played, moving on")
                     serviceScope.launch { markPlayed(finishedId) }
                 }
 
@@ -577,8 +588,13 @@ class PlayerService : MediaLibraryService() {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
                         val episodeId = currentEpisodeId()
+                        DiagLog.log("player", "queue ended on episode ${episodeId ?: "?"} → marking played")
                         serviceScope.launch { episodeId?.let { markPlayed(it) } }
                     }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    DiagLog.log("player", "ERROR ${error.errorCodeName} on ${player.currentMediaItem?.mediaId ?: "none"}: ${error.message}")
                 }
 
                 // Speed changes need to be reflected in the now-playing metadata subtitle
@@ -753,6 +769,7 @@ class PlayerService : MediaLibraryService() {
         }
         lastBrowseRefreshMs = now
         Log.d(TAG, "AA browse refresh starting (reason=$reason)")
+        DiagLog.log("aa", "browse refresh starting (reason=$reason)")
 
         val before = runCatching { readBrowseSnapshot() }.getOrNull()
 
@@ -764,7 +781,17 @@ class PlayerService : MediaLibraryService() {
         // feeds exist. Each step is isolated in a runCatching so one failure
         // doesn't stop the others; partial freshness is better than no freshness.
         runCatching { feedRepo.refreshFeeds() }
-            .onFailure { Log.w(TAG, "AA browse refresh: feeds failed", it) }
+            .onFailure { Log.w(TAG, "AA browse refresh: feeds failed", it); DiagLog.log("aa", "browse refresh: feeds failed: ${it.message}") }
+
+        // Cache the server's resume point for every chronological feed, so the
+        // Continue row still names the right episode when the next drive starts
+        // without a connection.
+        runCatching {
+            db.feedDao().getFeedOnceAll().filter { it.listenInOrder }.take(20).forEach { f ->
+                runCatching { feedRepo.refreshNextUp(f.id, episodeRepo) }
+                    .onFailure { DiagLog.log("aa", "next-up refresh failed for feed ${f.id}: ${it.message}") }
+            }
+        }
 
         runCatching { episodeRepo.fetchAndCacheContinueListening() }
             .onFailure { Log.w(TAG, "AA browse refresh: continue-listening failed", it) }
@@ -1110,6 +1137,22 @@ class PlayerService : MediaLibraryService() {
     private fun currentEpisodeId(): Int? =
         player.currentMediaItem?.mediaId?.removePrefix("episode_")?.toIntOrNull()
 
+    private fun transitionReason(reason: Int): String = when (reason) {
+        Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT -> "repeat"
+        Player.MEDIA_ITEM_TRANSITION_REASON_AUTO -> "auto"
+        Player.MEDIA_ITEM_TRANSITION_REASON_SEEK -> "seek"
+        Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED -> "playlist-changed"
+        else -> reason.toString()
+    }
+
+    // Remembered so NextUpResolver can resume where the player was when the
+    // server cannot be reached.
+    private fun rememberLastPlaying(episodeId: Int) {
+        serviceScope.launch {
+            runCatching { dataStore.edit { it[LAST_PLAYING_EPISODE_ID_KEY] = episodeId.toLong() } }
+        }
+    }
+
     override fun onDestroy() {
         stopProgressTracking()
         connectivityModeJob?.cancel()
@@ -1206,6 +1249,7 @@ private class PlayerLibrarySessionCallback(
         controller: MediaSession.ControllerInfo
     ): MediaSession.ConnectionResult {
         Log.d(TAG, "onConnect: pkg=${controller.packageName}")
+        DiagLog.log("session", "controller connected: ${controller.packageName}")
 
         val base = super.onConnect(session, controller)
         if (!base.isAccepted) return base
@@ -1230,6 +1274,19 @@ private class PlayerLibrarySessionCallback(
             .setMediaButtonPreferences(buttons)
             .setCustomLayout(buttons)
             .build()
+    }
+
+    override fun onMediaButtonEvent(
+        session: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        intent: android.content.Intent
+    ): Boolean {
+        val key = androidx.core.content.IntentCompat.getParcelableExtra(
+            intent, android.content.Intent.EXTRA_KEY_EVENT, android.view.KeyEvent::class.java)
+        DiagLog.log("session", "media button from ${controller.packageName}: " +
+            "${key?.let { android.view.KeyEvent.keyCodeToString(it.keyCode) } ?: "?"} action=${key?.action} " +
+            "queue=${player.mediaItemCount} current=${player.currentMediaItem?.mediaId ?: "none"}")
+        return super.onMediaButtonEvent(session, controller, intent)
     }
 
     override fun onDisconnected(
@@ -1582,6 +1639,8 @@ private class PlayerLibrarySessionCallback(
         asyncFuture(MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)) {
             val safeRequestedIndex = startIndex.coerceIn(0, mediaItems.lastIndex.coerceAtLeast(0))
             val requestedItem = mediaItems.getOrNull(safeRequestedIndex)
+            DiagLog.log("queue", "setMediaItems from ${controller.packageName}: ${mediaItems.map { it.mediaId }} " +
+                "start=$startIndex startMs=$startPositionMs offline=${CastCharmApp.isOfflineMode}")
 
             if (CastCharmApp.isOfflineMode && requestedItem != null && !canPlayOffline(requestedItem)) {
                 Log.w(
@@ -1639,6 +1698,9 @@ private class PlayerLibrarySessionCallback(
                     }
                 }
 
+                DiagLog.log("queue", "→ ${resolved.size} item(s), start #$safeStartIndex ${selectedItem?.mediaId} at ${finalStartPositionMs / 1000}s " +
+                    "(saved ${dbEpisode?.play_position_seconds ?: "-"}s, played=${dbEpisode?.played}); " +
+                    "queue=${resolved.take(6).map { it.mediaId }}${if (resolved.size > 6) "…" else ""}")
                 MediaSession.MediaItemsWithStartPosition(
                     resolved,
                     safeStartIndex,
@@ -1711,19 +1773,27 @@ private class PlayerLibrarySessionCallback(
                     else -> listOf(currentId) + queueIds       // re-listening a played one
                 }
                 start = maxOf(0, ids.indexOf(currentId))
+                DiagLog.log("queue", "feed $feedId: server queue ${queueIds.size} item(s), start $currentId")
             } catch (e: Exception) {
                 Log.w(TAG, "In-order queue from server failed; using local table", e)
+                DiagLog.log("queue", "feed $feedId: server unreachable (${e.javaClass.simpleName}: ${e.message}); deciding locally")
             }
         }
         if (ids.isEmpty()) {
             activeContext = null
-            val local = if (CastCharmApp.isOfflineMode) episodeDao.getInOrderQueueLocal(feedId)
-                        else episodeDao.getInOrderQueue(feedId)
+            val localOnly = CastCharmApp.isOfflineMode
+            val local = if (localOnly) episodeDao.getInOrderQueueLocal(feedId) else episodeDao.getInOrderQueue(feedId)
             val localIds = local.map { it.id }
-            val startId = tappedId
-                ?: episodeDao.getInProgressForFeed(feedId)?.id
-                ?: localIds.firstOrNull()
-                ?: return null
+            val startId: Int
+            if (tappedId != null) {
+                startId = tappedId
+            } else {
+                val lastPlaying = context.dataStore.data.first()[LAST_PLAYING_EPISODE_ID_KEY]?.toInt()
+                val choice = NextUpResolver.resolve(feed, episodeDao, lastPlaying, localOnly)
+                DiagLog.log("queue", "feed $feedId: local choice = ${choice?.episode?.id ?: "none"} (${choice?.reason ?: "nothing unplayed"}); " +
+                    "cached next-up=${feed.next_up_episode_id}, last loaded=$lastPlaying, local unplayed=${localIds.size}")
+                startId = choice?.episode?.id ?: return null
+            }
             ids = if (startId in localIds) localIds else listOf(startId) + localIds
             start = ids.indexOf(startId)
         }
@@ -1787,9 +1857,8 @@ private class PlayerLibrarySessionCallback(
 
     /** "Continue · Ep. 12 · Title" (or "All caught up") for an in-order feed. */
     private suspend fun createCatchUpItem(feed: FeedEntity): MediaItem {
-        val next = episodeDao.getInProgressForFeed(feed.id)
-            ?: (if (CastCharmApp.isOfflineMode) episodeDao.getInOrderQueueLocal(feed.id)
-                else episodeDao.getInOrderQueue(feed.id)).firstOrNull()
+        val lastPlaying = runCatching { context.dataStore.data.first()[LAST_PLAYING_EPISODE_ID_KEY]?.toInt() }.getOrNull()
+        val next = NextUpResolver.resolve(feed, episodeDao, lastPlaying, CastCharmApp.isOfflineMode)?.episode
         val subtitle = if (next == null) "All caught up" else buildString {
             next.seq_number?.let { append("Ep. ").append(it).append(" \u00B7 ") }
             append(next.title ?: "Untitled")

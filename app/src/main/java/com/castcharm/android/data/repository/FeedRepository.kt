@@ -77,7 +77,10 @@ class FeedRepository(
                 unplayed_count = feed.unplayed_count,
                 downloaded_count = feed.downloaded_count,
                 playback_speed = existingById[feed.id]?.playback_speed,
-                play_order = feed.play_order
+                play_order = feed.play_order,
+                // The list payload carries no next-up; keep the cached one.
+                next_up_episode_id = existingById[feed.id]?.next_up_episode_id,
+                next_up_position = existingById[feed.id]?.next_up_position
             )
         }
 
@@ -156,6 +159,24 @@ class FeedRepository(
         for (ep in eps) {
             runCatching { scheduler.cancelDownload(ep.id) }
             ep.local_path?.let { runCatching { java.io.File(it).delete() } }
+        }
+    }
+
+    /**
+     * Ask the server what "Continue" would play for a chronological feed and
+     * cache the answer on the feed row, making sure that episode's own row (and
+     * its saved position) is in the local table too. This is what lets the car
+     * resume the right episode when the server cannot be reached.
+     */
+    suspend fun refreshNextUp(feedId: Int, episodeRepo: EpisodeRepository) {
+        if (CastCharmApp.isOfflineMode) return
+        val out = api.getFeed(feedId)
+        val next = out.next_up
+        feedDao.updateNextUp(feedId, next?.episode_id, next?.position_seconds)
+        if (next != null) {
+            // fetchEpisodeFromApi merges with the local row and keeps any
+            // unsent local progress, so this never moves a position backwards.
+            episodeRepo.fetchEpisodeFromApi(next.episode_id)
         }
     }
 }

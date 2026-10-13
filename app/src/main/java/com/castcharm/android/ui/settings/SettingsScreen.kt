@@ -380,6 +380,8 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            DiagnosticsCard()
+
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                 modifier = Modifier.fillMaxWidth()
@@ -1208,5 +1210,47 @@ fun formatBytes(bytes: Long): String {
         bytes >= 1048576 -> String.format("%.1f MB", bytes / 1048576.0)
         bytes >= 1024 -> String.format("%.1f KB", bytes / 1024.0)
         else -> "$bytes B"
+    }
+}
+
+// A small on-phone diary of playback and Android Auto decisions (see DiagLog).
+// Capped at 10 MB and never sent anywhere; the buttons put it on the clipboard
+// or into a share sheet so it can be pasted into a bug report.
+@Composable
+private fun DiagnosticsCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var sizeKb by remember { mutableStateOf(com.castcharm.android.diag.DiagLog.sizeBytes() / 1024) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Diagnostics", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                "The app keeps a short log of what it played and why, including what the car asked for. " +
+                    "It stays on this phone (${sizeKb} KB, capped at 10 MB). If playback ever starts the wrong episode, copy this and share it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("CastCharm diagnostics", com.castcharm.android.diag.DiagLog.tail()))
+                    android.widget.Toast.makeText(context, "Diagnostics copied", android.widget.Toast.LENGTH_SHORT).show()
+                }) { Text("Copy") }
+                TextButton(onClick = {
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, "CastCharm diagnostics")
+                        putExtra(android.content.Intent.EXTRA_TEXT, com.castcharm.android.diag.DiagLog.tail(100_000))
+                    }
+                    context.startActivity(android.content.Intent.createChooser(send, "Share diagnostics"))
+                }) { Text("Share") }
+                TextButton(onClick = {
+                    com.castcharm.android.diag.DiagLog.clear()
+                    sizeKb = 0
+                }) { Text("Clear") }
+            }
+        }
     }
 }
