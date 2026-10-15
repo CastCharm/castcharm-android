@@ -24,6 +24,9 @@ object DiagLog {
     private const val DEFAULT_TAIL_CHARS = 200_000
 
     @Volatile private var dir: File? = null
+    /** Wall-clock ms when this process came up; "+1234ms" in entries counts from here. */
+    val processStartMs: Long = System.currentTimeMillis()
+    fun sinceStart(): String = "+${System.currentTimeMillis() - processStartMs}ms"
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "diaglog").apply { isDaemon = true } }
     private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 

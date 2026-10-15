@@ -98,6 +98,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         com.castcharm.android.diag.DiagLog.init(this)
+        val appStart = System.currentTimeMillis()
         apiClient = ApiClient(this)
         playerController = PlayerController(this)
         appSessionManager = AppSessionManager(this)
@@ -124,6 +125,7 @@ class CastCharmApp : Application(), ImageLoaderFactory {
         // Register notification channels once at process start. Cheap no-op on
         // subsequent boots because the system tracks channel identity.
         com.castcharm.android.notifications.NewEpisodesNotifier.ensureChannel(this)
+        com.castcharm.android.diag.DiagLog.log("app", "process up; Application.onCreate took ${System.currentTimeMillis() - appStart}ms")
     }
 
     override fun onTerminate() {

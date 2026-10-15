@@ -23,6 +23,9 @@
 package com.castcharm.android.ui.settings
 
 import androidx.compose.foundation.background
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
+import com.castcharm.android.AA_WARM_START_KEY
 import com.castcharm.android.AUTO_DOWNLOAD_CATCHUP_KEY
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -395,8 +398,6 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            DiagnosticsCard()
-
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                 modifier = Modifier.fillMaxWidth()
@@ -929,7 +930,11 @@ fun SettingsScreen(
                         }
                     }
                 }
-            }
+            
+                AndroidAutoCard()
+                DiagnosticsCard()
+                Spacer(Modifier.height(24.dp))
+}
         }
     }
 
@@ -1271,6 +1276,49 @@ private fun DiagnosticsCard() {
                     com.castcharm.android.diag.DiagLog.clear()
                     sizeKb = 0
                 }) { Text("Clear") }
+            }
+        }
+    }
+}
+
+
+// Android Auto reliability: the Bluetooth permission that lets the app hear
+// the car connect, and the switch for the warm start it triggers.
+@Composable
+private fun AndroidAutoCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val needsPermission = android.os.Build.VERSION.SDK_INT >= 31
+    var granted by remember {
+        mutableStateOf(!needsPermission || androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> granted = ok }
+    val scope = rememberCoroutineScope()
+    val enabled by CastCharmApp.instance.dataStore.data
+        .map { it[AA_WARM_START_KEY] ?: true }
+        .collectAsState(initial = true)
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Android Auto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Android Auto sometimes leaves CastCharm out of its app list when the app isn't running as the car connects. " +
+                    "With Bluetooth access, the app wakes itself for a few minutes whenever a device connects, so Android Auto finds it ready.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (!granted) {
+                TextButton(onClick = { launcher.launch(android.Manifest.permission.BLUETOOTH_CONNECT) }) { Text("Allow Bluetooth access") }
+            } else {
+                SettingsToggleRow(
+                    title = "Wake for Android Auto",
+                    subtitle = "Start the player service when a Bluetooth device connects.",
+                    checked = enabled,
+                    onCheckedChange = { on -> scope.launch { CastCharmApp.instance.dataStore.edit { it[AA_WARM_START_KEY] = on } } },
+                )
             }
         }
     }

@@ -30,6 +30,11 @@ val NOTIFY_NEW_EPISODES_KEY = booleanPreferencesKey("notify_new_episodes")
 // and eligible for notification.
 val LAST_NOTIFIED_EPISODE_ID_KEY = longPreferencesKey("last_notified_episode_id")
 
+// Android Auto: when true (the default), a Bluetooth connection wakes the
+// media service for a few minutes so Android Auto's validator finds a live
+// session and lists the app (CarConnectReceiver / CarWarmStart).
+val AA_WARM_START_KEY = booleanPreferencesKey("aa_warm_start")
+
 // Downloads: when true, every episode in the built-in "Get Caught Up" smart
 // playlist is saved to this phone whenever the app syncs while online
 // (CatchUpDownloader), so the backlog is available offline.

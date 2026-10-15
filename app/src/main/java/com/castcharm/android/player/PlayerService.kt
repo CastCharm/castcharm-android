@@ -394,9 +394,20 @@ class PlayerService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "PlayerService.onCreate start")
-        DiagLog.log("service", "created (app ${com.castcharm.android.BuildConfig.VERSION_NAME}, offline=${CastCharmApp.isOfflineMode})")
-        ensureSessionReady()
+        val t0 = System.currentTimeMillis()
+        DiagLog.log("service", "created ${DiagLog.sinceStart()} after process start (app ${com.castcharm.android.BuildConfig.VERSION_NAME}, offline=${CastCharmApp.isOfflineMode})")
+        val ok = ensureSessionReady() != null
+        DiagLog.log("service", "session ${if (ok) "ready" else "FAILED"} in ${System.currentTimeMillis() - t0}ms")
     }
+
+    // Every bind — Android Auto's included — passes through here. Logged so a
+    // car connection that never reaches onGetSession is visible as such.
+    override fun onBind(intent: android.content.Intent?): android.os.IBinder? {
+        DiagLog.log("service", "bind ${DiagLog.sinceStart()} action=${intent?.action ?: "none"} session=${if (mediaSession != null) "ready" else "missing"}")
+        return super.onBind(intent)
+    }
+
+
 
     /**
      * Builds the player and the MediaLibrarySession, and returns the session.
@@ -1220,6 +1231,7 @@ class PlayerService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        DiagLog.log("service", "destroyed ${DiagLog.sinceStart()}")
         stopProgressTracking()
         connectivityModeJob?.cancel()
         mediaSession?.release()
@@ -1238,6 +1250,8 @@ class PlayerService : MediaLibraryService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         Log.d(TAG, "onGetSession: pkg=${controllerInfo.packageName}")
+        val t0 = System.currentTimeMillis()
+        val hadSession = mediaSession != null
         // Rebuild on demand if the session is missing. Returning null here is how
         // Media3 rejects a connection, so without this a failed start is
         // indistinguishable — to Android Auto — from the app not being installed.
@@ -1245,6 +1259,8 @@ class PlayerService : MediaLibraryService() {
         if (session == null) {
             Log.e(TAG, "onGetSession: rebuild failed, rejecting ${controllerInfo.packageName}")
         }
+        DiagLog.log("service", "onGetSession from ${controllerInfo.packageName} ${DiagLog.sinceStart()}: " +
+            "${if (session == null) "REJECTED (no session)" else if (hadSession) "handed existing session" else "rebuilt session"} in ${System.currentTimeMillis() - t0}ms")
         return session
     }
 }
@@ -1445,6 +1461,8 @@ private class PlayerLibrarySessionCallback(
         // so the head unit's browse tree updates as soon as the DB does. The
         // return path below still uses whatever's currently in the DB so this
         // request stays fast (Android Auto has a strict timeout).
+        DiagLog.log("aa", "library root requested by ${browser.packageName} ${DiagLog.sinceStart()} " +
+            "(recent=${params?.isRecent}, offline=${params?.isOffline}, offlineMode=${CastCharmApp.isOfflineMode})")
         onBrowseRoot()
         val root = rootItem(context)
         val extras = root.mediaMetadata.extras ?: Bundle()
