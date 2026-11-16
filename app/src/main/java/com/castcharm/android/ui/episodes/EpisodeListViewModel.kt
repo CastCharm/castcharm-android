@@ -17,6 +17,7 @@ import com.castcharm.android.LAST_PLAYING_EPISODE_ID_KEY
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.castcharm.android.CastCharmApp
+import com.castcharm.android.data.api.parseApiError
 import com.castcharm.android.data.db.AppDatabase
 import com.castcharm.android.data.db.entities.EpisodeEntity
 import com.castcharm.android.data.db.entities.FeedEntity
@@ -933,7 +934,7 @@ class EpisodeListViewModel(private val feedId: Int) : ViewModel() {
                 }
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(errorMessage = "Failed to update: ${e.message}")
+                    it.copy(errorMessage = "Failed to update: ${e.parseApiError().message ?: e.message}")
                 }
             }
         }

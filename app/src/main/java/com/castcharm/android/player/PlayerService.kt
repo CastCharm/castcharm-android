@@ -1758,77 +1758,185 @@ private class PlayerLibrarySessionCallback(
         startPositionMs: Long
     ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> =
         asyncFuture(MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)) {
-            val safeRequestedIndex = startIndex.coerceIn(0, mediaItems.lastIndex.coerceAtLeast(0))
-            val requestedItem = mediaItems.getOrNull(safeRequestedIndex)
             DiagLog.log("queue", "setMediaItems from ${controller.packageName}: ${mediaItems.map { it.mediaId }} " +
                 "start=$startIndex startMs=$startPositionMs offline=${CastCharmApp.isOfflineMode}")
+            buildPlaybackItems(controller.packageName, mediaItems, startIndex, startPositionMs)
+        }
 
-            if (CastCharmApp.isOfflineMode && requestedItem != null && !canPlayOffline(requestedItem)) {
-                Log.w(
-                    TAG,
-                    "Blocked offline playback for mediaId=${requestedItem.mediaId} controller=${controller.packageName}"
-                )
-                MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)
-            } else {
-                // One episode of a feed listened to in order becomes that feed's
-                // queue from this episode onward, so the car, the headset and the
-                // phone all keep going without any UI alive to advance them.
-                val (itemsToResolve, indexToStart) =
-                    expandInOrderQueue(mediaItems, safeRequestedIndex) ?: (mediaItems to startIndex)
-                val startAt = indexToStart.coerceIn(0, itemsToResolve.lastIndex.coerceAtLeast(0))
-                val resolved = kotlinx.coroutines.coroutineScope {
-                    itemsToResolve.mapIndexed { i, it ->
-                        async { resolveMediaItem(it, embedArtwork = i == startAt) }
-                    }.awaitAll()
+    /**
+     * Playback resumption: a controller asked to play while the player holds
+     * nothing — Android Auto reconnecting after the app's process was killed,
+     * a headset button, the system's resume card. Media3's default answers
+     * "unsupported", nothing starts, and Android Auto then plays the first
+     * playable row of the browse tree, which is "Get Caught Up › Play all",
+     * instead of the episode that was part-way through (issue #17).
+     *
+     * Resumes the episode the player last had loaded through the same path as
+     * a tap on it, so a listen-in-order feed or the playlist the server says
+     * it came from keeps going as a queue.
+     */
+    @OptIn(UnstableApi::class)
+    override fun onPlaybackResumption(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        isForPlayback: Boolean
+    ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+        scope.launch {
+            try {
+                // A cold start kicked off a pull from the server; let it land
+                // (it is capped) so an episode finished elsewhere since the
+                // last drive reads as played.
+                if (isForPlayback && !CastCharmApp.isOfflineMode) awaitBrowseRefresh()
+                val target = resumeTarget()
+                DiagLog.log("resume", "requested by ${controller.packageName} (forPlayback=$isForPlayback, " +
+                    "offline=${CastCharmApp.isOfflineMode}): " +
+                    (target?.let { "${it.first.mediaId} — ${it.second}" } ?: "nothing to resume"))
+                if (target == null) {
+                    future.setException(UnsupportedOperationException("Nothing to resume"))
+                    return@launch
                 }
-
-                val safeStartIndex = indexToStart.coerceIn(0, resolved.lastIndex.coerceAtLeast(0))
-                val selectedItem = resolved.getOrNull(safeStartIndex)
-
-                val selectedEpisodeId = selectedItem
-                    ?.mediaId
-                    ?.removePrefix("episode_")
-                    ?.toIntOrNull()
-
-                val dbEpisode = selectedEpisodeId?.let { episodeDao.getEpisodeOnce(it) }
-                val savedResumeMs = dbEpisode
-                    ?.takeIf { !it.played }
-                    ?.play_position_seconds
-                    ?.takeIf { it > 0 }
-                    ?.let { maxOf(0L, it * 1000L - 5000L) }
-                    ?: 0L
-
-                Log.d(TAG, "onSetMediaItems mediaId=${selectedItem?.mediaId} " +
-                    "incomingStartMs=$startPositionMs savedResumeMs=$savedResumeMs " +
-                    "dbPos=${dbEpisode?.play_position_seconds} played=${dbEpisode?.played} " +
-                    "pkg=${controller.packageName}")
-
-                val finalStartPositionMs = when {
-                    startPositionMs > 0L -> startPositionMs
-                    (startPositionMs == 0L || startPositionMs == C.TIME_UNSET) && savedResumeMs > 0L -> {
-                        Log.d(
-                            TAG,
-                            "AA resume selectedIndex=$safeStartIndex mediaId=${selectedItem?.mediaId} " +
-                                    "controller=${controller.packageName} savedResumeMs=$savedResumeMs " +
-                                    "incomingStartPositionMs=$startPositionMs queueSize=${resolved.size}"
-                        )
-                        savedResumeMs
-                    }
-                    else -> {
-                        if (startPositionMs == C.TIME_UNSET) 0L else startPositionMs
-                    }
+                val result = if (isForPlayback) {
+                    buildPlaybackItems(controller.packageName, listOf(target.first), 0, C.TIME_UNSET)
+                } else {
+                    resumeMetadataOnly(target.first)
                 }
+                if (result.mediaItems.isEmpty()) {
+                    future.setException(IllegalStateException("Resume target ${target.first.mediaId} could not be loaded"))
+                } else {
+                    future.set(result)
+                }
+            } catch (e: Exception) {
+                DiagLog.log("resume", "failed: ${e.javaClass.simpleName}: ${e.message}")
+                future.setException(e)
+            }
+        }.invokeOnCompletion {
+            if (!future.isDone) future.setException(IllegalStateException("Resumption cancelled"))
+        }
+        return future
+    }
 
-                DiagLog.log("queue", "→ ${resolved.size} item(s), start #$safeStartIndex ${selectedItem?.mediaId} at ${finalStartPositionMs / 1000}s " +
-                    "(saved ${dbEpisode?.play_position_seconds ?: "-"}s, played=${dbEpisode?.played}); " +
-                    "queue=${resolved.take(6).map { it.mediaId }}${if (resolved.size > 6) "…" else ""}")
-                MediaSession.MediaItemsWithStartPosition(
-                    resolved,
-                    safeStartIndex,
-                    finalStartPositionMs
-                )
+    /**
+     * What to resume, most trusted first: the episode the player last had
+     * loaded while it is unfinished; the next one of its feed if that feed is
+     * listened to in order and it was finished; else the most recently played
+     * unfinished episode. Offline, only what is on the phone.
+     */
+    private suspend fun resumeTarget(): Pair<MediaItem, String>? {
+        val candidates = mutableListOf<Pair<MediaItem, String>>()
+        val lastId = runCatching { context.dataStore.data.first()[LAST_PLAYING_EPISODE_ID_KEY]?.toInt() }.getOrNull()
+        val last = lastId?.let { episodeDao.getEpisodeOnce(it) }
+        if (last != null && !last.hidden) {
+            if (!last.played) {
+                candidates += MediaItem.Builder().setMediaId("episode_${last.id}").build() to "last loaded in player"
+            } else if (feedDao.getFeedOnce(last.feed_id)?.listenInOrder == true) {
+                candidates += MediaItem.Builder().setMediaId(CATCHUP_PREFIX + last.feed_id).build() to
+                    "next in order after episode ${last.id}"
             }
         }
+        episodeDao.getContinueListening(limit = 1).first().firstOrNull()?.let {
+            candidates += MediaItem.Builder().setMediaId("episode_${it.id}").build() to "most recent in progress"
+        }
+        return candidates.firstOrNull { !CastCharmApp.isOfflineMode || canPlayOffline(it.first) }
+    }
+
+    /** The single item a resume notification shows; no queue, no server calls. */
+    private suspend fun resumeMetadataOnly(target: MediaItem): MediaSession.MediaItemsWithStartPosition {
+        val empty = MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)
+        val episodeId = target.mediaId.removePrefix("episode_").toIntOrNull()
+            ?: target.mediaId.removePrefix(CATCHUP_PREFIX).toIntOrNull()?.let { feedId ->
+                val feed = feedDao.getFeedOnce(feedId) ?: return empty
+                val lastPlaying = runCatching { context.dataStore.data.first()[LAST_PLAYING_EPISODE_ID_KEY]?.toInt() }.getOrNull()
+                NextUpResolver.resolve(feed, episodeDao, lastPlaying, CastCharmApp.isOfflineMode)?.episode?.id
+            }
+            ?: return empty
+        val ep = episodeDao.getEpisodeOnce(episodeId) ?: return empty
+        val item = createEpisodeItem(ep, feedDao.getFeedOnce(ep.feed_id)?.title)
+        val positionMs = if (ep.played) 0L else ep.play_position_seconds * 1000L
+        return MediaSession.MediaItemsWithStartPosition(listOf(item), 0, positionMs)
+    }
+
+    /**
+     * What the player should load for a request to play [mediaItems]: the
+     * listen-in-order / playlist queue around it, every item resolved to a URI,
+     * and the start position (the saved one when the caller gives none). Shared
+     * by a play request and by playback resumption, so both behave the same.
+     */
+    private suspend fun buildPlaybackItems(
+        callerPackage: String,
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long
+    ): MediaSession.MediaItemsWithStartPosition {
+        val safeRequestedIndex = startIndex.coerceIn(0, mediaItems.lastIndex.coerceAtLeast(0))
+        val requestedItem = mediaItems.getOrNull(safeRequestedIndex)
+
+        return if (CastCharmApp.isOfflineMode && requestedItem != null && !canPlayOffline(requestedItem)) {
+            Log.w(
+                TAG,
+                "Blocked offline playback for mediaId=${requestedItem.mediaId} controller=$callerPackage"
+            )
+            MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)
+        } else {
+            // One episode of a feed listened to in order becomes that feed's
+            // queue from this episode onward, so the car, the headset and the
+            // phone all keep going without any UI alive to advance them.
+            val (itemsToResolve, indexToStart) =
+                expandInOrderQueue(mediaItems, safeRequestedIndex) ?: (mediaItems to startIndex)
+            val startAt = indexToStart.coerceIn(0, itemsToResolve.lastIndex.coerceAtLeast(0))
+            val resolved = kotlinx.coroutines.coroutineScope {
+                itemsToResolve.mapIndexed { i, it ->
+                    async { resolveMediaItem(it, embedArtwork = i == startAt) }
+                }.awaitAll()
+            }
+
+            val safeStartIndex = indexToStart.coerceIn(0, resolved.lastIndex.coerceAtLeast(0))
+            val selectedItem = resolved.getOrNull(safeStartIndex)
+
+            val selectedEpisodeId = selectedItem
+                ?.mediaId
+                ?.removePrefix("episode_")
+                ?.toIntOrNull()
+
+            val dbEpisode = selectedEpisodeId?.let { episodeDao.getEpisodeOnce(it) }
+            val savedResumeMs = dbEpisode
+                ?.takeIf { !it.played }
+                ?.play_position_seconds
+                ?.takeIf { it > 0 }
+                ?.let { maxOf(0L, it * 1000L - 5000L) }
+                ?: 0L
+
+            Log.d(TAG, "onSetMediaItems mediaId=${selectedItem?.mediaId} " +
+                "incomingStartMs=$startPositionMs savedResumeMs=$savedResumeMs " +
+                "dbPos=${dbEpisode?.play_position_seconds} played=${dbEpisode?.played} " +
+                "pkg=$callerPackage")
+
+            val finalStartPositionMs = when {
+                startPositionMs > 0L -> startPositionMs
+                (startPositionMs == 0L || startPositionMs == C.TIME_UNSET) && savedResumeMs > 0L -> {
+                    Log.d(
+                        TAG,
+                        "AA resume selectedIndex=$safeStartIndex mediaId=${selectedItem?.mediaId} " +
+                                "controller=$callerPackage savedResumeMs=$savedResumeMs " +
+                                "incomingStartPositionMs=$startPositionMs queueSize=${resolved.size}"
+                    )
+                    savedResumeMs
+                }
+                else -> {
+                    if (startPositionMs == C.TIME_UNSET) 0L else startPositionMs
+                }
+            }
+
+            DiagLog.log("queue", "→ ${resolved.size} item(s), start #$safeStartIndex ${selectedItem?.mediaId} at ${finalStartPositionMs / 1000}s " +
+                "(saved ${dbEpisode?.play_position_seconds ?: "-"}s, played=${dbEpisode?.played}); " +
+                "queue=${resolved.take(6).map { it.mediaId }}${if (resolved.size > 6) "…" else ""}")
+            MediaSession.MediaItemsWithStartPosition(
+                resolved,
+                safeStartIndex,
+                finalStartPositionMs
+            )
+        }
+    }
 
     override fun onAddMediaItems(
         mediaSession: MediaSession,

@@ -35,7 +35,11 @@ data class FeedEntity(
     // What the server said "Continue" should play for this feed, cached at the
     // last refresh so the car can resume the right episode without a network.
     val next_up_episode_id: Int? = null,
-    val next_up_position: Int? = null
+    val next_up_position: Int? = null,
+    // Multi-user servers: whether this account owns the podcast or someone
+    // shared it. A shared one is left, not deleted, and the owner's name shows.
+    val is_owner: Boolean = true,
+    val owner_username: String? = null
 ) {
     val listenInOrder: Boolean get() = play_order == "oldest"
 }

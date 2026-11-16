@@ -34,7 +34,15 @@ data class FeedOut(
     val play_order: String? = null,
     // What "Continue" would play; only present for play_order == "oldest".
     val next_up: NextUpOut? = null,
-)
+    // Multi-user servers: whether this account owns the podcast, who does,
+    // and what the account may do with it. Older servers omit all three.
+    val is_owner: Boolean = true,
+    val owner_username: String? = null,
+    val permissions: Map<String, Boolean> = emptyMap(),
+) {
+    /** True unless the server says this account lacks the flag. */
+    fun may(flag: String): Boolean = permissions[flag] ?: true
+}
 
 data class NextUpOut(
     val episode_id: Int,

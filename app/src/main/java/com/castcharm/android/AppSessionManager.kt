@@ -13,6 +13,10 @@ package com.castcharm.android
 // cooldown prevents the event from firing again immediately after it clears. This
 // avoids false alarms from transient network blips.
 
+import com.castcharm.android.data.api.parseApiError
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import android.widget.Toast
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -552,7 +556,20 @@ suspend fun ensureApiKey(context: Context, force: Boolean = false): Boolean {
             Log.i("AppSessionManager", "Enrolled API key '${created.name}' for this device")
             true
         } catch (e: Exception) {
-            Log.i("AppSessionManager", "API key enrolment unavailable, staying on cookie auth", e)
+            // A 403 is policy, not a fault: the account may not create keys, or is
+            // still on a temporary password. The server's sentence says which, and
+            // the person should hear it — on cookie auth alone this device will be
+            // signed out when the session lapses.
+            val reason = (e as? retrofit2.HttpException)?.takeIf { it.code() == 403 }
+                ?.let { e.parseApiError().message }
+            if (reason != null) {
+                Log.w("AppSessionManager", "API key enrolment refused: $reason")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Signed in without a device key: $reason", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                Log.i("AppSessionManager", "API key enrolment unavailable, staying on cookie auth", e)
+            }
             false
         }
     }

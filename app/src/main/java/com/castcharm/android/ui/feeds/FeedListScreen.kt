@@ -189,6 +189,7 @@ fun FeedListScreen(
             feedTitles = uiState.feeds
                 .filter { it.id in uiState.selectedFeeds }
                 .map { it.title ?: it.url },
+            sharedCount = uiState.feeds.count { it.id in uiState.selectedFeeds && !it.is_owner },
             onConfirm = { deleteFiles ->
                 showDeleteFeedsConfirm = false
                 viewModel.deleteSelectedFeeds(deleteFiles)
@@ -414,9 +415,14 @@ private fun DeleteFeedsDialog(
     feedTitles: List<String>,
     onConfirm: (deleteFiles: Boolean) -> Unit,
     onDismiss: () -> Unit,
+    sharedCount: Int = 0,
 ) {
     var deleteFiles by remember { mutableStateOf(false) }
     val count = feedTitles.size
+    // A podcast someone shared with this account is not ours to delete: the
+    // server removes our access and leaves the owner's files alone.
+    val allShared = sharedCount == count && count > 0
+    val someShared = sharedCount in 1 until count
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -428,15 +434,25 @@ private fun DeleteFeedsDialog(
             )
         },
         title = {
-            Text("Remove ${if (count == 1) "podcast" else "$count podcasts"} from the server?")
+            Text(
+                if (allShared) "Remove ${if (count == 1) "this podcast" else "$count podcasts"} from your library?"
+                else "Remove ${if (count == 1) "podcast" else "$count podcasts"} from the server?"
+            )
         },
         text = {
             Column {
                 Text(
-                    text = "This unsubscribes your CastCharm server, not just this phone. " +
-                        "The ${if (count == 1) "podcast" else "podcasts"} and all episode " +
-                        "history will be gone for every device, and this cannot be undone " +
-                        "from the app.",
+                    text = if (allShared) {
+                        "${if (count == 1) "This podcast was" else "These podcasts were"} shared with you. " +
+                            "${if (count == 1) "It stays" else "They stay"} in the owner's library; only your " +
+                            "access, playlist entries and listening progress are removed."
+                    } else {
+                        "This unsubscribes your CastCharm server, not just this phone. " +
+                            "The ${if (count == 1) "podcast" else "podcasts"} and all episode " +
+                            "history will be gone for every device, and this cannot be undone " +
+                            "from the app." +
+                            (if (someShared) " $sharedCount of them ${if (sharedCount == 1) "was" else "were"} shared with you and will only be removed from your library." else "")
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
 
@@ -463,7 +479,7 @@ private fun DeleteFeedsDialog(
 
                 Spacer(Modifier.height(16.dp))
 
-                Row(
+                if (!allShared) Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
@@ -478,7 +494,7 @@ private fun DeleteFeedsDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                if (!deleteFiles) {
+                if (!deleteFiles && !allShared) {
                     Text(
                         text = "Leaving this unchecked keeps the audio files on the server, " +
                             "but they will no longer belong to any podcast.",
@@ -495,7 +511,7 @@ private fun DeleteFeedsDialog(
                     contentColor = MaterialTheme.colorScheme.error
                 )
             ) {
-                Text("Delete from server")
+                Text(if (allShared) "Remove" else "Delete from server")
             }
         },
         dismissButton = {

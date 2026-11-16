@@ -80,7 +80,9 @@ class FeedRepository(
                 play_order = feed.play_order,
                 // The list payload carries no next-up; keep the cached one.
                 next_up_episode_id = existingById[feed.id]?.next_up_episode_id,
-                next_up_position = existingById[feed.id]?.next_up_position
+                next_up_position = existingById[feed.id]?.next_up_position,
+                is_owner = feed.is_owner,
+                owner_username = feed.owner_username
             )
         }
 

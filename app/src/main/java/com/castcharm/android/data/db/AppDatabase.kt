@@ -31,7 +31,7 @@ import com.castcharm.android.data.db.entities.FeedEntity
 
 @Database(
     entities = [FeedEntity::class, EpisodeEntity::class, DownloadEntity::class, PlaylistEntity::class, PlaylistMemberEntity::class, DownloadOwnerEntity::class],
-    version = 8
+    version = 9
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun feedDao(): FeedDao
@@ -86,6 +86,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // 8 → 9: multi-user servers say whether a podcast is ours or shared with us.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE feeds ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE feeds ADD COLUMN owner_username TEXT")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             // Double-checked locking. The second check, inside the lock, is the
             // half that actually makes this safe and was previously missing: two
@@ -106,7 +114,7 @@ abstract class AppDatabase : RoomDatabase() {
                     // Known schema steps migrate in place so local_path links and
                     // unsynced offline progress survive an update. The destructive
                     // fallback only covers a jump no migration describes.
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
