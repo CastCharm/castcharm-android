@@ -12,7 +12,7 @@ android {
         applicationId = "com.castcharm.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 24
+        versionCode = 25
         versionName = "1.12.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
