@@ -11,6 +11,9 @@
 #     existing tag, so you can't publish the wrong build by accident
 #   - copies the APK to castcharm-v<version>.apk (a stable name pattern that
 #     update tools like Obtainium can follow from release to release)
+#   - attaches R8's mapping.txt as castcharm-v<version>-mapping.txt, so stack
+#     traces from that build (Play vitals, a user's diagnostics log) can be
+#     decoded with `retrace`; release builds are obfuscated
 #   - creates the tag and the release on GitHub with notes generated from the
 #     commits since the previous tag, and attaches the APK
 #
@@ -25,6 +28,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APK="app/release/app-release.apk"
+MAPPING="app/build/outputs/mapping/release/mapping.txt"
 GRADLE="app/build.gradle.kts"
 NOTES=""
 DRAFT=""
@@ -50,6 +54,7 @@ CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/
 [ -n "$VERSION" ] || die "could not read versionName from $GRADLE"
 TAG="v$VERSION"
 ASSET="castcharm-$TAG.apk"
+MAPPING_ASSET="castcharm-$TAG-mapping.txt"
 
 [ -f "$APK" ] || die "$APK not found — build a signed release APK in Android Studio first"
 
@@ -57,6 +62,12 @@ ASSET="castcharm-$TAG.apk"
 # about to publish a build that doesn't contain what's committed.
 NEWEST_SRC="$(find app/src app/build.gradle.kts -type f -newer "$APK" 2>/dev/null | head -1 || true)"
 [ -z "$NEWEST_SRC" ] || die "$APK is older than $NEWEST_SRC — rebuild the signed APK first"
+
+# R8 writes the mapping just before it packages the APK, so it belongs to this
+# build only if it is also newer than the source tree.
+[ -f "$MAPPING" ] || die "$MAPPING not found — is minify enabled for the release build?"
+NEWEST_SRC="$(find app/src app/build.gradle.kts app/proguard-rules.pro -type f -newer "$MAPPING" 2>/dev/null | head -1 || true)"
+[ -z "$NEWEST_SRC" ] || die "$MAPPING is older than $NEWEST_SRC — rebuild the signed APK first"
 
 [ -z "$(git status --porcelain)" ] || die "working tree has uncommitted changes — commit (or stash) first"
 
@@ -68,6 +79,7 @@ PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 
 echo "Release:     $TAG (versionCode $CODE)"
 echo "APK:         $APK ($(du -h "$APK" | cut -f1)) → $ASSET"
+echo "Mapping:     $MAPPING → $MAPPING_ASSET"
 echo "Since:       ${PREV_TAG:-<first release>}"
 echo "Commit:      $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)"
 [ -n "$DRAFT" ] && echo "Mode:        draft"
@@ -76,6 +88,7 @@ if [ -n "$DRY_RUN" ]; then echo "(dry run — nothing published)"; exit 0; fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cp "$APK" "$TMP/$ASSET"
+cp "$MAPPING" "$TMP/$MAPPING_ASSET"
 
 # Tag the exact commit the APK was built from, then let gh create the release
 # from that tag. --generate-notes writes the changelog from commits/PRs since
@@ -84,9 +97,9 @@ git tag -a "$TAG" -m "CastCharm for Android $VERSION"
 git push origin "$TAG"
 
 if [ -n "$NOTES" ]; then
-  gh release create "$TAG" "$TMP/$ASSET" --title "CastCharm for Android $VERSION" --notes "$NOTES" $DRAFT
+  gh release create "$TAG" "$TMP/$ASSET" "$TMP/$MAPPING_ASSET" --title "CastCharm for Android $VERSION" --notes "$NOTES" $DRAFT
 else
-  gh release create "$TAG" "$TMP/$ASSET" --title "CastCharm for Android $VERSION" --generate-notes $DRAFT
+  gh release create "$TAG" "$TMP/$ASSET" "$TMP/$MAPPING_ASSET" --title "CastCharm for Android $VERSION" --generate-notes $DRAFT
 fi
 
 echo "Published: $(gh release view "$TAG" --json url -q .url)"
