@@ -71,6 +71,8 @@ class PodcastArtworkProvider : ContentProvider() {
          * Both caches have to go: this provider's own file cache (used by Android
          * Auto) and Coil's memory + disk caches (used by the phone UI).
          */
+        // Coil 2 marks its disk cache API experimental.
+        @OptIn(coil.annotation.ExperimentalCoilApi::class)
         fun evictFeedArtwork(context: android.content.Context, feedId: Int) {
             // The durable copy stored beside downloads is keyed by feed id too,
             // so a recycled id would serve the previous podcast's cover from

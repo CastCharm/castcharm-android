@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+    id("androidx.room")
 }
 
 android {
@@ -43,6 +44,12 @@ android {
         compose = true
         buildConfig = true
     }
+}
+
+// Room writes each database version's schema here (commit the files): a
+// record of what every migration starts from, and what migration tests use.
+room {
+    schemaDirectory("$projectDir/schemas")
 }
 
 kotlin {
